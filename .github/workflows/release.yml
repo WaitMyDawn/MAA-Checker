@@ -1,0 +1,106 @@
+name: release
+
+# 发版只有两个入口：
+#   1) 打 tag（主路径）：git push origin v0.2.0   → 自动打包并把三份产物发到 Releases
+#   2) 手动兜底：Actions 页面 Run workflow（填同一个版本号即可补发，Release 已存在时覆盖资产）
+#
+# 版本号规则（tag 就是唯一真相）：
+#   v0.1.1          → 修 bug（patch）
+#   v0.2.0          → 加功能（minor）
+#   v1.0.0          → 破坏性改动（major，比如台账/配置格式变了）
+#   v0.3.0-rc.1     → 预发布：Release 勾 prerelease；产物内部版本仍取 0.3.0
+#                     （launch4j / jpackage 只接受 x.y.z 数字版本）
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（纯数字点分，如 0.2.0）'
+        required: true
+      prerelease:
+        description: '标记为预发布（prerelease）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write           # gh release create / upload 需要写权限
+
+jobs:
+  release:
+    name: 打包并发布（exe / lite / 自带运行时）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 JDK 21（Temurin，含 jlink/jpackage）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 解析版本号
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $raw = '${{ inputs.version }}'
+            $pre = '${{ inputs.prerelease }}'
+          } else {
+            $raw = '${{ github.ref_name }}'                 # 形如 v0.2.0 或 v0.3.0-rc.1
+            $pre = if ($raw -match '-') { 'true' } else { 'false' }
+          }
+          $ver = ($raw -replace '^v', '') -replace '-.*$', ''   # 只取数字点分部分
+          if ($ver -notmatch '^\d+\.\d+\.\d+$') {
+            throw "版本号必须是 x.y.z（当前解析为 '$ver'）—— launch4j/jpackage 只接受数字点分版本"
+          }
+          "VERSION=$ver"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PRERELEASE=$pre"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "版本号 = $ver（prerelease=$pre）"
+
+      - name: 单测（门禁：不通过就不发版）
+        run: mvn -B -ntp test
+
+      - name: 打包三份产物（exe + lite + 自带运行时）
+        shell: pwsh
+        run: |
+          # 与本地完全同一套脚本；CI 上没有兄弟目录的 mvnw，所以传 -Mvn mvn
+          powershell -ExecutionPolicy Bypass -File package.ps1 `
+            -Version $env:VERSION -WithJre -Mvn mvn -NoOffline
+
+      - name: 生成校验和 SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem "dist/MAA-Checker-$env:VERSION-*.zip" | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          $lines | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: 发布到 Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v$env:VERSION"
+          $assets = @(
+            "dist/MAA-Checker-$env:VERSION-win-x64.zip",
+            "dist/MAA-Checker-$env:VERSION-lite.zip",
+            "dist/MAA-Checker-$env:VERSION-win-x64-jre.zip",
+            "dist/SHA256SUMS.txt"
+          )
+          foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "缺少产物: $a" } }
+
+          # 幂等：Release 已存在就覆盖上传资产（补发/重跑都不会报错）
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag 已存在 → 覆盖上传资产"
+            gh release upload $tag @assets --clobber
+          } else {
+            $opt = @()
+            if ($env:PRERELEASE -eq 'true') { $opt += '--prerelease' }
+            # 手动补发时 tag 可能还不存在：让它指向本次构建的提交，而不是默认分支的 HEAD
+            $remoteTag = git ls-remote --tags origin "refs/tags/$tag" 2>$null
+            if (-not $remoteTag) { $opt += "--target=$env:GITHUB_SHA" }
+            gh release create $tag @assets --title $tag --generate-notes @opt
+          }

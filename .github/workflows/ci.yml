@@ -1,0 +1,28 @@
+name: ci
+
+# 只跑单测：push / PR 都能在 1 分钟内看到"改坏了没有"。
+# 注意：这里刻意不打包、不发版 —— 发版走 release.yml（打 tag 才触发）。
+on:
+  push:
+    branches: ['**']        # 指定了 branches，tag push 就不会触发这个工作流
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 单测
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 JDK 21（Temurin，含 jpackage）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 单测
+        run: mvn -B -ntp test

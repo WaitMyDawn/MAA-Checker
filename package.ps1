@@ -12,6 +12,15 @@
     -WithJre        额外再打一份自带运行时的版本（jpackage app-image，约 54MB / zip 39MB）
     -NoTrim         -WithJre 时用完整运行时（不裁剪，体积更大，排查用）
     -Version x.y.z  版本号（默认 0.1.0）
+                    —— 它同时决定：zip 名、jpackage 的版本、以及 exe 右键属性里的版本
+                    （通过 mvn -Drevision=... 传给 pom，见 pom 里的 <revision>）
+    -Mvn <命令>     用什么跑 maven（默认用本地开发机的 ..\Minecraft-AI-Agent\mvnw.cmd；
+                    CI 上那个目录不存在，所以 CI 传 -Mvn mvn）
+    -NoOffline      跳过"先离线再联网"的第一轮（CI 首次没有本地仓库，离线必然失败白等一轮）
+
+  典型用法：
+    本地： powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.1.0 -WithJre
+    CI ： powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.2.0 -WithJre -Mvn mvn -NoOffline
 
   为什么要"默认不带 JRE"：玩整合包的机器上必然有 Java（启动器会提醒），
   exe 版的 Launch4j 包装器会自己按 PATH/JAVA_HOME/注册表找 Java 21+，
@@ -22,7 +31,9 @@ param(
     [switch]$OnlyExe,
     [switch]$OnlyLite,
     [switch]$WithJre,
-    [switch]$NoTrim
+    [switch]$NoTrim,
+    [string]$Mvn = '',
+    [switch]$NoOffline
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,12 +63,22 @@ function New-Zip([string]$srcDir, [string]$zipPath) {
 }
 
 Write-Host '=== 1/4 编译（含生成 exe）===' -ForegroundColor Cyan
-# 优先离线（依赖与 launch4j 插件通常已在本地仓库）；缺东西时自动联网再试一次
-& "$root\..\Minecraft-AI-Agent\mvnw.cmd" -o -q -DskipTests package
-if ($LASTEXITCODE -ne 0) {
-    Write-Host '  离线构建失败，改为联网构建（首次需要下载 launch4j 插件）…' -ForegroundColor Yellow
-    & "$root\..\Minecraft-AI-Agent\mvnw.cmd" -q -DskipTests package
-    if ($LASTEXITCODE -ne 0) { throw "mvnw 打包失败（退出码 $LASTEXITCODE）" }
+# maven 用哪个：默认本地开发机的兄弟目录 wrapper；CI 传 -Mvn mvn
+$mvnCmd = if ($Mvn) { $Mvn } else { Join-Path (Split-Path $root -Parent) 'Minecraft-AI-Agent\mvnw.cmd' }
+# 版本号透给 pom 的 <revision>：zip 名、jpackage 版本、exe 属性三者一致
+$verArg = "-Drevision=$Version"
+if ($NoOffline) {
+    Write-Host "  构建（联网）: $mvnCmd $verArg package"
+    & $mvnCmd -q -DskipTests $verArg package
+    if ($LASTEXITCODE -ne 0) { throw "maven 打包失败（退出码 $LASTEXITCODE）" }
+} else {
+    # 优先离线（依赖与 launch4j 插件通常已在本地仓库）；缺东西时自动联网再试一次
+    & $mvnCmd -o -q -DskipTests $verArg package
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '  离线构建失败，改为联网构建（首次需要下载 launch4j 插件）…' -ForegroundColor Yellow
+        & $mvnCmd -q -DskipTests $verArg package
+        if ($LASTEXITCODE -ne 0) { throw "maven 打包失败（退出码 $LASTEXITCODE）" }
+    }
 }
 $jar = Join-Path $root 'target\maa-checker.jar'
 $exe = Join-Path $root 'target\MAA-Checker.exe'

@@ -6,7 +6,12 @@
 
     <groupId>yagen.waitmydawn.maa</groupId>
     <artifactId>maa-checker</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <!--
+      版本号：用 Maven 的 CI-friendly ${revision}（本地默认 0.1.0；发版时 CI 传 -Drevision=<tag 版本>）。
+      这样 zip 名 / Release 名 / exe 右键属性里的版本三者天然一致，
+      不会出现"发 0.2.0、但 exe 属性还写着 0.1.0"这种坑。
+    -->
+    <version>${revision}</version>
     <packaging>jar</packaging>
     <name>MAA Checker</name>
     <description>整合包可行性检验器：就地对已安装实例做"静态预检 → 自动启动 → 日志诊断 → 最小摘除/补装/升级 → 台账与还原"</description>
@@ -14,6 +19,8 @@
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- 版本号唯一来源：本地默认 0.1.0；CI/打包脚本用 -Drevision=x.y.z 覆盖（必须是数字点分，launch4j/jpackage 只吃这种） -->
+        <revision>0.1.0</revision>
         <!-- 用本地仓库已有的版本，保证可以 -o 离线构建 -->
         <jackson.version>2.17.1</jackson.version>
         <junit.version>5.10.2</junit.version>
@@ -96,12 +103,13 @@
                                 <jdkPreference>preferJre</jdkPreference>
                             </jre>
                             <versionInfo>
-                                <fileVersion>0.1.0.0</fileVersion>
-                                <txtFileVersion>0.1.0</txtFileVersion>
-                                <productVersion>0.1.0.0</productVersion>
-                                <txtProductVersion>0.1.0</txtProductVersion>
+                                <!-- 跟着 ${revision} 走：fileVersion 必须是 4 段数字，所以补一个 .0 -->
+                                <fileVersion>${project.version}.0</fileVersion>
+                                <txtFileVersion>${project.version}</txtFileVersion>
+                                <productVersion>${project.version}.0</productVersion>
+                                <txtProductVersion>${project.version}</txtProductVersion>
                                 <fileDescription>MAA-Checker - Minecraft 整合包可行性检验器</fileDescription>
-                                <copyright>MAA-Checker</copyright>
+                                <copyright>Yagen</copyright>
                                 <productName>MAA-Checker</productName>
                                 <internalName>MAA-Checker</internalName>
                                 <originalFilename>MAA-Checker.exe</originalFilename>

@@ -1,0 +1,23 @@
+# 行尾与文本/二进制的统一约定。
+#
+# 为什么需要它（见 README 踩坑记录第 7 条）：
+#   * *.bat / *.cmd 必须是 CRLF —— LF-only 的批处理在 cmd.exe 下有坑（标签、多行块会出怪问题）；
+#   * *.ps1 必须能保留 BOM —— Windows PowerShell 5.1 会按 ANSI 读无 BOM 的 UTF-8 脚本，
+#     中文注释会变成乱码进而语法错（git 不会动 BOM，但别让工具把它规范化掉）；
+#   * 发给用户的 *.txt 也用 CRLF（老版记事本打开更正常）。
+
+* text=auto
+
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.txt   text eol=crlf
+
+# 二进制：不做任何转换
+*.jar   binary
+*.exe   binary
+*.ico   binary
+*.png   binary
+*.gif   binary
+*.zip   binary

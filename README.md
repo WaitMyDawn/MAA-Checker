@@ -484,14 +484,59 @@ ui/      CheckerGui（Swing 三区界面）· RoundAskers（轮次用完的三�
 ### 开发与构建
 
 ```bash
-# 编译 + 单测（65 个）
+# 编译 + 单测
 ../Minecraft-AI-Agent/mvnw.cmd -o test
 
 # 打包（默认出 exe 版 + lite 版；-WithJre 额外出自带运行时版）
 powershell -ExecutionPolicy Bypass -File package.ps1
 powershell -ExecutionPolicy Bypass -File package.ps1 -OnlyExe
 powershell -ExecutionPolicy Bypass -File package.ps1 -WithJre
+
+# 指定版本号（zip 名 / jpackage / exe 右键属性都会用它）
+powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.2.0
+
+# CI 上的写法：用 runner 的 mvn（本地那个兄弟目录 wrapper 在 CI 上不存在）
+powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.2.0 -WithJre -Mvn mvn -NoOffline
 ```
+
+版本号的唯一来源是 pom 里的 `<revision>`（Maven CI-friendly 版本）：
+本地默认 `0.1.0`，`package.ps1 -Version x.y.z` 会把它作为 `-Drevision=x.y.z` 传进去，
+于是 **zip 名 / Release 名 / exe 属性里的版本**三者天然一致。
+
+### 发版（打 tag 即发布）
+
+仓库里有两个工作流：
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| `.github/workflows/ci.yml` | push 到任意分支 / PR | **只跑单测**（不发版），1 分钟出结果 |
+| `.github/workflows/release.yml` | push tag `v*`，或 Actions 页面手动 Run | 单测门禁 → 打包 **exe / lite / 自带运行时** 三份 + `SHA256SUMS.txt` → 发到 Releases |
+
+日常发版就三条命令：
+
+```bash
+git add -A && git commit -m "feat: xxx" && git push
+git tag v0.2.0          # 打 tag 就是"我要发这个版本"
+git push origin v0.2.0  # 到这里就完了：自动打包 + 自动发 Release
+```
+
+**版本号怎么涨**（语义化，tag 里去掉 `v` 就是版本号）：
+
+| 改了什么 | 涨哪一位 | 例子 |
+|---|---|---|
+| 修 bug / 文档 / 性能 | **patch** | `v0.1.0` → `v0.1.1` |
+| 加功能（新命令、新判据、新归因渠道） | **minor** | `v0.1.1` → `v0.2.0` |
+| 破坏兼容（台账/配置/目录结构变了，老版本读不了） | **major** | `v0.2.0` → `v1.0.0` |
+
+几个要知道的约定：
+
+- **预发布**：tag 写 `v0.3.0-rc.1` → Release 自动勾 prerelease；产物内部版本仍取 `0.3.0`
+  （`launch4j`/`jpackage` 只接受 `x.y.z` 数字版本）；
+- **单测挂了不会发版**：push 分支照样推上去了（那是 git 的事），但 tag 触发的工作流会在单测那步失败，
+  **不会创建 Release**；修好后去 Actions 页面 **Run workflow** 填同一个版本号即可补发
+  （Release 已存在时会用 `--clobber` 覆盖资产，重跑幂等）；
+- **建议顺序**：先 push 分支让 `ci.yml` 跑绿，再打 tag——这样 tag 上的门禁基本不会失败；
+- 发布说明默认用 `--generate-notes`（GitHub 按提交自动生成），要手写就改 workflow 最后一步。
 
 ### 实测证据（都在真实实例上跑过）
 
@@ -554,8 +599,17 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -WithJre
     每轮只摘最可信的那一个，剩下的留给下一轮暴露。
 
 ### 路线图
-
-- [ ] 下线 `Minecraft-AI-Agent` 服务端沙盒（本工具完工后由作者确认）
 - [ ] Forge / Fabric 的加载器就地升级
-- [ ] 可选的图形界面安装器（需要 WiX）
 - [ ] "能不能玩"的进一步校验（进世界、跑 N 秒、看是否有运行时崩溃）
+
+---
+
+## 许可证
+
+本项目采用 **MIT License**（见 [LICENSE](LICENSE)）。
+
+关于打包产物里的第三方内容：
+
+- `maa-checker.jar` 里打包了 **Jackson**（Apache-2.0），与 MIT 兼容；
+- **自带运行时版**（`*-win-x64-jre.zip`）里含一份用 `jlink` 裁剪出来的
+  **OpenJDK 运行时**（GPLv2 + Classpath Exception，允许随程序一起分发）。
