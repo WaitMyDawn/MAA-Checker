@@ -1,0 +1,43 @@
+# ---------- 构建产物 ----------
+target/
+dist/
+out/
+
+# ---------- 运行期产物（工具自己生成的）----------
+logs/
+bin/
+state/
+config.properties
+
+# ---------- 临时/日志/压缩包 ----------
+*.log
+*.zip
+*.7z
+*.tar.gz
+*.part
+*.curlpart
+_mk*
+
+# ---------- PoC 的运行日志----------
+poc/logs/
+
+# ---------- IDE ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+*.launch
+
+# ---------- 系统垃圾 ----------
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---------- Java ----------
+*.class
+hs_err_pid*
+replay_pid*

@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>yagen.waitmydawn.maa</groupId>
+    <artifactId>maa-checker</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <name>MAA Checker</name>
+    <description>整合包可行性检验器：就地对已安装实例做"静态预检 → 自动启动 → 日志诊断 → 最小摘除/补装/升级 → 台账与还原"</description>
+
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- 用本地仓库已有的版本，保证可以 -o 离线构建 -->
+        <jackson.version>2.17.1</jackson.version>
+        <junit.version>5.10.2</junit.version>
+    </properties>
+
+    <dependencies>
+        <!-- 只用来解析实例版本 JSON / fabric.mod.json；TOML 用手写解析器（见 core/ModToml） -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>maa-checker</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+            </plugin>
+            <!-- 打成一个可直接 java -jar 跑的 fat jar；后续用 jpackage 包成免安装目录 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>yagen.waitmydawn.checker.CheckerCli</mainClass>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!--
+              生成"双击即用"的 exe（不含 JRE，运行时自己找系统的 Java 21+）。
+              必须放在 shade 之后：两者都绑在 package 阶段，Maven 按声明顺序执行，
+              先出 maa-checker.jar，再由 Launch4j 把 jar 嵌进 exe。
+              说明：headerType=gui → 双击不弹黑窗；代价是命令行参数看不到输出，
+              要用命令行就执行 java -jar maa-checker.jar（lite 版）。
+            -->
+            <plugin>
+                <groupId>com.akathist.maven.plugins.launch4j</groupId>
+                <artifactId>launch4j-maven-plugin</artifactId>
+                <version>2.5.0</version>
+                <executions>
+                    <execution>
+                        <id>make-exe</id>
+                        <phase>package</phase>
+                        <goals><goal>launch4j</goal></goals>
+                        <configuration>
+                            <headerType>gui</headerType>
+                            <outfile>${project.build.directory}/MAA-Checker.exe</outfile>
+                            <jar>${project.build.directory}/maa-checker.jar</jar>
+                            <errTitle>MAA-Checker</errTitle>
+                            <classPath>
+                                <mainClass>yagen.waitmydawn.checker.CheckerCli</mainClass>
+                            </classPath>
+                            <jre>
+                                <minVersion>21</minVersion>
+                                <jdkPreference>preferJre</jdkPreference>
+                            </jre>
+                            <versionInfo>
+                                <fileVersion>0.1.0.0</fileVersion>
+                                <txtFileVersion>0.1.0</txtFileVersion>
+                                <productVersion>0.1.0.0</productVersion>
+                                <txtProductVersion>0.1.0</txtProductVersion>
+                                <fileDescription>MAA-Checker - Minecraft 整合包可行性检验器</fileDescription>
+                                <copyright>MAA-Checker</copyright>
+                                <productName>MAA-Checker</productName>
+                                <internalName>MAA-Checker</internalName>
+                                <originalFilename>MAA-Checker.exe</originalFilename>
+                            </versionInfo>
+                            <messages>
+                                <jreVersionErr>MAA-Checker 需要 Java 21 或更高版本。请安装 Java 21 后重试
+（推荐 Temurin 21 或 Microsoft OpenJDK 21；装了 HMCL 的话本工具通常能找到 HMCL 自带的运行时）。</jreVersionErr>
+                                <jreNotFoundErr>没有找到 Java。MAA-Checker 需要 Java 21 或更高版本，
+请安装后重试（推荐 Temurin 21 或 Microsoft OpenJDK 21）。</jreNotFoundErr>
+                                <startupErr>MAA-Checker 启动失败</startupErr>
+                            </messages>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
