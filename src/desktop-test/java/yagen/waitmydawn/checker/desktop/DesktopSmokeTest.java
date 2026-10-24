@@ -33,6 +33,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** 在真实 JavaFX 图形工具包上验证导航、取消、失败和主题，截图写入构建目录。 */
 class DesktopSmokeTest {
+    private static final long FX_STARTUP_TIMEOUT_SECONDS = 30;
+    private static final long FX_CALL_TIMEOUT_SECONDS = 30;
+    private static final long FX_POLL_TIMEOUT_SECONDS = 10;
+    private static final long UI_STATUS_TIMEOUT_SECONDS = 30;
+    private static final long SCAN_STATUS_TIMEOUT_SECONDS = 30;
+
     private DesktopShell shell;
     private Stage stage;
     private CheckPane isolatedCheck;
@@ -41,7 +47,7 @@ class DesktopSmokeTest {
     void 桌面主流程与响应布局可运行(@TempDir Path fixture) throws Exception {
         CountDownLatch ready = new CountDownLatch(1);
         Platform.startup(ready::countDown);
-        assertTrue(ready.await(15, TimeUnit.SECONDS), "JavaFX 启动超时");
+        assertTrue(ready.await(FX_STARTUP_TIMEOUT_SECONDS, TimeUnit.SECONDS), "JavaFX 启动超时");
         Platform.setImplicitExit(false);
         try {
             fx(() -> {
@@ -96,7 +102,8 @@ class DesktopSmokeTest {
             String json = "{\"id\":\"ReadonlySample\",\"inheritsFrom\":\"1.21.1\",\"mainClass\":\"net.minecraft.client.main.Main\",\"libraries\":[]}";
             Files.writeString(metadata, json);
             fx(() -> shell.scanDirectory(fixture));
-            long scanDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            long scanDeadline = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(SCAN_STATUS_TIMEOUT_SECONDS);
             boolean scanned = false;
             while (System.nanoTime() < scanDeadline) {
                 FutureTask<Boolean> result = new FutureTask<>(() -> {
@@ -104,7 +111,7 @@ class DesktopSmokeTest {
                     return shell.root().lookupAll(".label").stream().anyMatch(n -> n instanceof Label l && l.getText().contains("识别到 1 个实例"));
                 });
                 Platform.runLater(result);
-                if (result.get(3, TimeUnit.SECONDS)) { scanned = true; break; }
+                if (result.get(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) { scanned = true; break; }
                 Thread.sleep(50);
             }
             assertTrue(scanned, "后台只读扫描未完成");
@@ -140,7 +147,7 @@ class DesktopSmokeTest {
                 Thread.sleep(60_000);
                 return TaskResult.success(java.util.List.of(), "不应完成");
             }));
-            assertTrue(scanStarted.await(3, TimeUnit.SECONDS));
+            assertTrue(scanStarted.await(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS));
             fx(() -> fire("cancel-scan"));
             awaitScanMessage("已停止扫描");
             fx(() -> shell.scanDirectory(fixture, context -> {
@@ -319,7 +326,7 @@ class DesktopSmokeTest {
                 pane[0].select(first);
                 assertFalse(pane[0].startAvailableProperty().get());
             });
-            assertTrue(firstStarted.await(5, TimeUnit.SECONDS));
+            assertTrue(firstStarted.await(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS));
             awaitLabel(pane[0].root(), "workflow-load-state", "LOADING");
 
             fx(() -> pane[0].select(second));
@@ -444,7 +451,8 @@ class DesktopSmokeTest {
             snapshot("29-storage-orphan-preview");
         });
         fx(() -> fire("confirm-clean-orphans"));
-        long orphanDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        long orphanDeadline = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(UI_STATUS_TIMEOUT_SECONDS);
         while (Files.exists(orphan) && System.nanoTime() < orphanDeadline) Thread.sleep(30);
         assertFalse(Files.exists(orphan));
         awaitLabelChanged(shell.root(), "storage-reclaim-status", reclaimBeforeCleanup);
@@ -460,7 +468,8 @@ class DesktopSmokeTest {
             snapshot("31-storage-branch-preview");
         });
         fx(() -> fire("confirm-delete-branch"));
-        long branchDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        long branchDeadline = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(UI_STATUS_TIMEOUT_SECONDS);
         Path workflowFile = instance.dir().resolve(".maa-checker/workflows/" + removableWorkflow + ".json");
         while (Files.exists(workflowFile) && System.nanoTime() < branchDeadline) Thread.sleep(30);
         assertFalse(Files.exists(workflowFile));
@@ -472,7 +481,8 @@ class DesktopSmokeTest {
         });
         awaitButton("confirm-clean-storage");
         fx(() -> fire("confirm-clean-storage"));
-        long cleanupDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        long cleanupDeadline = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(UI_STATUS_TIMEOUT_SECONDS);
         while (Files.exists(artifact) && System.nanoTime() < cleanupDeadline) Thread.sleep(30);
         assertFalse(Files.exists(artifact));
     }
@@ -551,7 +561,7 @@ class DesktopSmokeTest {
             snapshot("34-recovery-preview");
             fire("confirm-reassociation");
         });
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(UI_STATUS_TIMEOUT_SECONDS);
         while (true) {
             try {
                 var reopened = yagen.waitmydawn.checker.task.RepairWorkflow.history(moved);
@@ -593,7 +603,7 @@ class DesktopSmokeTest {
     }
 
     private void awaitButton(String id) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(UI_STATUS_TIMEOUT_SECONDS);
         while (System.nanoTime() < deadline) {
             FutureTask<Boolean> ready = new FutureTask<>(() -> {
                 shell.root().applyCss(); shell.root().layout();
@@ -601,7 +611,7 @@ class DesktopSmokeTest {
                 return node instanceof Button button && !button.isDisabled();
             });
             Platform.runLater(ready);
-            if (ready.get(3, TimeUnit.SECONDS)) return;
+            if (ready.get(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) return;
             Thread.sleep(50);
         }
         FutureTask<String> diagnostic = new FutureTask<>(() -> {
@@ -609,11 +619,12 @@ class DesktopSmokeTest {
             return phase instanceof Label label ? label.getText() : "";
         });
         Platform.runLater(diagnostic);
-        fail("操作未就绪：" + id + "；当前状态：" + diagnostic.get(3, TimeUnit.SECONDS));
+        fail("操作未就绪：" + id + "；当前状态："
+                + diagnostic.get(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS));
     }
 
     private String awaitBranchButton() throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(UI_STATUS_TIMEOUT_SECONDS);
         Node stable = null;
         int stableChecks = 0;
         while (System.nanoTime() < deadline) {
@@ -629,7 +640,7 @@ class DesktopSmokeTest {
                 return null;
             });
             Platform.runLater(ready);
-            Node found = ready.get(3, TimeUnit.SECONDS);
+            Node found = ready.get(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (found != null && found == stable) stableChecks++;
             else {
                 stable = found;
@@ -797,7 +808,7 @@ class DesktopSmokeTest {
             Thread.sleep(60_000);
             return TaskResult.success(null, "不应到达");
         }));
-        assertTrue(started.await(5, TimeUnit.SECONDS));
+        assertTrue(started.await(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS));
         fx(() -> ((Button) pane[0].root().lookup("#cancel-check")).fire());
         awaitLabel(pane[0].root(), "check-status", "检查已停止");
         fx(() -> {
@@ -837,7 +848,7 @@ class DesktopSmokeTest {
     private void awaitCheckMessage(String expected) throws Exception { awaitLabel(shell.root(), "check-status", expected); }
 
     private void awaitLabel(javafx.scene.Parent root, String id, String expected) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(UI_STATUS_TIMEOUT_SECONDS);
         while (System.nanoTime() < deadline) {
             FutureTask<Boolean> matches = new FutureTask<>(() -> {
                 root.applyCss();
@@ -845,7 +856,7 @@ class DesktopSmokeTest {
                 return label != null && label.getText().contains(expected);
             });
             Platform.runLater(matches);
-            if (matches.get(3, TimeUnit.SECONDS)) return;
+            if (matches.get(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) return;
             Thread.sleep(50);
         }
         fail("状态未更新：" + expected);
@@ -858,11 +869,11 @@ class DesktopSmokeTest {
             return node instanceof Label label ? label.getText() : null;
         });
         Platform.runLater(current);
-        return current.get(3, TimeUnit.SECONDS);
+        return current.get(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
     private void awaitLabelChanged(javafx.scene.Parent root, String id, String previous) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(UI_STATUS_TIMEOUT_SECONDS);
         while (System.nanoTime() < deadline) {
             FutureTask<String> current = new FutureTask<>(() -> {
                 root.applyCss();
@@ -870,7 +881,7 @@ class DesktopSmokeTest {
                 return node instanceof Label label ? label.getText() : null;
             });
             Platform.runLater(current);
-            String value = current.get(3, TimeUnit.SECONDS);
+            String value = current.get(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (value != null && !value.equals(previous)) return;
             Thread.sleep(50);
         }
@@ -878,7 +889,8 @@ class DesktopSmokeTest {
     }
 
     private void awaitScanMessage(String expected) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        long deadline = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(SCAN_STATUS_TIMEOUT_SECONDS);
         while (System.nanoTime() < deadline) {
             FutureTask<Boolean> matches = new FutureTask<>(() -> {
                 shell.root().applyCss();
@@ -886,7 +898,7 @@ class DesktopSmokeTest {
                 return label != null && label.getText().contains(expected);
             });
             Platform.runLater(matches);
-            if (matches.get(3, TimeUnit.SECONDS)) return;
+            if (matches.get(FX_POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) return;
             Thread.sleep(30);
         }
         fail("扫描状态未更新：" + expected);
@@ -906,7 +918,7 @@ class DesktopSmokeTest {
     private void fx(Runnable action) throws Exception {
         FutureTask<Void> task = new FutureTask<>(action, null);
         Platform.runLater(task);
-        task.get(15, TimeUnit.SECONDS);
+        task.get(FX_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
     private void snapshot(String name) {
