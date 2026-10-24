@@ -461,7 +461,7 @@ public final class InstanceLauncher {
         Files.createDirectories(spec.stdoutLog().getParent());
         if (context != null && spec.runDir() != null && Files.exists(spec.latestLog(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
             Path latest = spec.latestLog().toAbsolutePath().normalize();
-            if (!Files.isRegularFile(latest, java.nio.file.LinkOption.NOFOLLOW_LINKS) || !latest.toRealPath().equals(latest)) {
+            if (!PathSafety.isRegularFile(latest)) {
                 throw new IOException("启动日志不是普通文件，拒绝移动");
             }
             // 连续两次崩溃可能生成逐字相同的日志，内容锚点无法区分截断重写与未更新。

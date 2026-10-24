@@ -28,7 +28,7 @@ public final class PreparationCleanup {
                 for (File file : current.files()) {
                     context.checkpoint();
                     Path target = root.resolve(file.relative()).normalize();
-                    if (!target.startsWith(root) || !target.toRealPath().equals(target)) throw new IOException("准备缓存路径发生变化");
+                    if (!target.startsWith(root) || !PathSafety.isRegularFile(target)) throw new IOException("准备缓存路径发生变化");
                     BasicFileAttributes attrs = Files.readAttributes(target, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
                     if (!attrs.isRegularFile() || attrs.size() != file.size() || attrs.lastModifiedTime().toMillis() != file.modified()) throw new IOException("准备缓存文件发生变化");
                     Files.delete(target); removed++;
@@ -36,7 +36,7 @@ public final class PreparationCleanup {
                 for (String relative : current.directories().reversed()) {
                     context.checkpoint();
                     Path target = root.resolve(relative).normalize();
-                    if (!target.startsWith(root) || !target.toRealPath().equals(target)) throw new IOException("准备缓存目录发生变化");
+                    if (!target.startsWith(root) || !PathSafety.isDirectory(target)) throw new IOException("准备缓存目录发生变化");
                     Files.delete(target);
                 }
                 return TaskResult.success(removed, "已清理 " + removed + " 个准备文件；轮次快照、事务与运行库保留");
@@ -53,7 +53,7 @@ public final class PreparationCleanup {
         if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) Files.walkFileTree(root, new SimpleFileVisitor<>() {
             private void check(Path path) throws IOException {
                 checkpoint.run();
-                if (!path.toRealPath().equals(path.toAbsolutePath().normalize())) throw new IOException("准备区包含链接，拒绝清理");
+                if (PathSafety.containsLink(path)) throw new IOException("准备区包含链接，拒绝清理");
                 String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
                 if (name.startsWith(".env") || name.equals("secrets") || name.equals("credentials") || name.endsWith(".key")
                         || name.endsWith(".pem") || name.endsWith(".p12") || name.endsWith(".pfx")) throw new IOException("准备区存在受保护内容，拒绝清理");

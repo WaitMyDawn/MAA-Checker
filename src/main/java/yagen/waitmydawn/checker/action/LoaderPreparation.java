@@ -219,13 +219,13 @@ public final class LoaderPreparation {
             @Override public FileVisitResult preVisitDirectory(Path directory, java.nio.file.attribute.BasicFileAttributes attrs) throws IOException {
                 context.checkpoint();
                 String name = directory.getFileName().toString().toLowerCase(Locale.ROOT);
-                if (!directory.toRealPath().equals(directory.toAbsolutePath().normalize()) || name.startsWith(".env")
+                if (!PathSafety.isDirectory(directory) || name.startsWith(".env")
                         || name.equals("secrets") || name.equals("credentials")) throw new IOException("库目录包含链接或受保护路径");
                 return FileVisitResult.CONTINUE;
             }
             @Override public FileVisitResult visitFile(Path file, java.nio.file.attribute.BasicFileAttributes attrs) throws IOException {
                 context.checkpoint();
-                if (!file.toRealPath().equals(file.toAbsolutePath().normalize())) throw new IOException("库文件包含链接");
+                if (!PathSafety.isRegularFile(file)) throw new IOException("库文件包含链接");
                 if (file.toString().endsWith(".jar")) files.add(file);
                 return FileVisitResult.CONTINUE;
             }

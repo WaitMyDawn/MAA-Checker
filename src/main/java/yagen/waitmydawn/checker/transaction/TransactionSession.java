@@ -2,6 +2,7 @@ package yagen.waitmydawn.checker.transaction;
 
 import yagen.waitmydawn.checker.core.GameInstance;
 import yagen.waitmydawn.checker.core.InstanceStorage;
+import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.core.RepairInputs;
 
 import java.io.IOException;
@@ -338,18 +339,18 @@ public final class TransactionSession implements AutoCloseable {
         if (kind == Kind.DISABLE_PACK_MARKER || kind == Kind.RESTORE_MARKER_ADD || kind == Kind.RESTORE_MARKER_REPLACE) {
             if (!filename.equals("modpack.cfg")) throw new IOException("整合包标记目标不匹配");
             Path directory = Path.of(identity.directory());
-            if (!directory.toRealPath().equals(directory)) throw new IOException("实例目录发生链接变化");
+            if (!PathSafety.isDirectory(directory)) throw new IOException("实例目录发生链接变化");
             return directory.resolve(filename);
         }
         if (kind == Kind.REPLACE_VERSION) {
             if (!Path.of(identity.versionFile()).getFileName().toString().equals(filename)) throw new IOException("元数据目标不匹配");
             Path target = Path.of(identity.versionFile());
-            if (!target.getParent().toRealPath().equals(target.getParent())) throw new IOException("实例目录已发生链接变化");
+            if (!PathSafety.isDirectory(target.getParent())) throw new IOException("实例目录已发生链接变化");
             return target;
         }
         if (!filename.toLowerCase(Locale.ROOT).endsWith(".jar")) throw new IOException("模组动作只允许 JAR 文件");
         Path mods = Path.of(identity.modsDirectory());
-        if (!mods.toRealPath().equals(mods)) throw new IOException("模组目录已发生链接变化");
+        if (!PathSafety.isDirectory(mods)) throw new IOException("模组目录已发生链接变化");
         return mods.resolve(filename);
     }
 

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import yagen.waitmydawn.checker.core.GameInstance;
 import yagen.waitmydawn.checker.core.InstanceStorage;
+import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.core.RepairInputs;
 import yagen.waitmydawn.checker.core.RunJournal;
 import yagen.waitmydawn.checker.transaction.ActionRecord;
@@ -490,7 +491,7 @@ public final class StorageReclaim {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
                 checkpoint.run();
-                if (!attrs.isDirectory() || !dir.toRealPath().equals(dir.toAbsolutePath().normalize())) {
+                if (!attrs.isDirectory() || !PathSafety.isDirectory(dir)) {
                     throw new IOException("回收范围包含目录链接");
                 }
                 return FileVisitResult.CONTINUE;
@@ -544,7 +545,7 @@ public final class StorageReclaim {
         Files.walkFileTree(absolute, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-                if (!attrs.isDirectory() || !dir.toRealPath().equals(dir.toAbsolutePath().normalize())
+                if (!attrs.isDirectory() || !PathSafety.isDirectory(dir)
                         || sensitive(dir)) {
                     throw new IOException("回收目录包含链接或受保护路径");
                 }

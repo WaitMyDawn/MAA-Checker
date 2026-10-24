@@ -3,6 +3,7 @@ package yagen.waitmydawn.checker.task;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import yagen.waitmydawn.checker.core.GameInstance;
 import yagen.waitmydawn.checker.core.InstanceStorage;
+import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.core.RepairInputs;
 import yagen.waitmydawn.checker.transaction.InstanceIdentity;
 import yagen.waitmydawn.checker.transaction.RoundSnapshot;
@@ -594,7 +595,7 @@ public final class RecoveryIntegrity {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
                 checkpoint.run();
-                if (!attrs.isDirectory() || !dir.toRealPath().equals(dir.toAbsolutePath().normalize())) {
+                if (!attrs.isDirectory() || !PathSafety.isDirectory(dir)) {
                     throw new IOException("事务账本包含目录链接");
                 }
                 return FileVisitResult.CONTINUE;

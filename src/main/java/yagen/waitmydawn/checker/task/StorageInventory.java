@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import yagen.waitmydawn.checker.core.GameInstance;
 import yagen.waitmydawn.checker.core.InstanceStorage;
+import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.core.RunJournal;
 import yagen.waitmydawn.checker.transaction.ActionRecord;
 import yagen.waitmydawn.checker.transaction.InstanceIdentity;
@@ -230,7 +231,7 @@ public final class StorageInventory {
                         @Override public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
                                 throws IOException {
                             checkpoint.run();
-                            if (!dir.toRealPath().equals(dir.toAbsolutePath().normalize())) {
+                            if (!PathSafety.isDirectory(dir)) {
                                 throw new IOException("存储目录包含链接：" + dir);
                             }
                             return FileVisitResult.CONTINUE;
@@ -239,7 +240,7 @@ public final class StorageInventory {
                         @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
                                 throws IOException {
                             checkpoint.run();
-                            if (attrs.isRegularFile() && !Files.isSymbolicLink(file)) {
+                            if (attrs.isRegularFile() && PathSafety.isRegularFile(file)) {
                                 result.add(new Item(file, attrs.size()));
                             }
                             return FileVisitResult.CONTINUE;

@@ -39,7 +39,7 @@ public record RepairInputs(String versionFile, String modsDirectory, Map<String,
                 throw new IOException("修复输入不能来自敏感配置路径");
             }
         }
-        if (!Files.isRegularFile(absolute, LinkOption.NOFOLLOW_LINKS) || !absolute.toRealPath().equals(absolute)) {
+        if (!PathSafety.isRegularFile(absolute)) {
             throw new IOException("修复输入必须为普通文件：" + absolute.getFileName());
         }
         try (var input = Files.newInputStream(absolute, LinkOption.NOFOLLOW_LINKS)) {

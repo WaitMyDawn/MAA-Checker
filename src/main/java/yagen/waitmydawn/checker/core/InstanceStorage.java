@@ -13,8 +13,9 @@ public final class InstanceStorage {
     public static Path directory(Path parent, String child, boolean create) throws IOException {
         Path path = parent.resolve(child);
         if (create && !Files.exists(path, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(path);
-        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)
-                && (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) || !path.toRealPath().equals(path))) throw new IOException("受管目录包含链接或异常文件：" + path);
+        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) && !PathSafety.isDirectory(path)) {
+            throw new IOException("受管目录包含链接或异常文件：" + path);
+        }
         return path;
     }
     public static Path libraries(GameInstance instance, String runtime, boolean create) throws IOException {

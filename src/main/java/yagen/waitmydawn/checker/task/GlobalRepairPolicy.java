@@ -1,6 +1,7 @@
 package yagen.waitmydawn.checker.task;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.task.TaskService;
 
 import java.io.IOException;
@@ -87,9 +88,7 @@ public final class GlobalRepairPolicy {
     private static Path path(Path toolRoot, boolean create) throws IOException {
         Path state = toolRoot.toAbsolutePath().normalize().resolve("state");
         if (create) Files.createDirectories(state);
-        if (Files.exists(state, LinkOption.NOFOLLOW_LINKS)
-                && (!Files.isDirectory(state, LinkOption.NOFOLLOW_LINKS)
-                || !state.toRealPath().equals(state))) {
+        if (Files.exists(state, LinkOption.NOFOLLOW_LINKS) && !PathSafety.isDirectory(state)) {
             throw new IOException("全局状态目录包含链接或异常文件");
         }
         return state.resolve(FILE);

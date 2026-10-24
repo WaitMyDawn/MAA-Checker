@@ -1,6 +1,7 @@
 package yagen.waitmydawn.checker.transaction;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import yagen.waitmydawn.checker.core.PathSafety;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -21,14 +22,14 @@ final class TransactionFiles {
     static Path directory(Path parent, String name, boolean create) throws IOException {
         Path child = parent.resolve(name);
         if (create && !Files.exists(child, NOFOLLOW_LINKS)) Files.createDirectory(child);
-        if (!Files.isDirectory(child, NOFOLLOW_LINKS) || !child.toRealPath().equals(child)) {
+        if (!PathSafety.isDirectory(child)) {
             throw new IOException("事务目录不是普通目录或存在链接：" + child);
         }
         return child;
     }
 
     static void regular(Path file) throws IOException {
-        if (!Files.isRegularFile(file, NOFOLLOW_LINKS) || !file.toRealPath().equals(file.toAbsolutePath().normalize())) {
+        if (!PathSafety.isRegularFile(file)) {
             throw new IOException("事务文件不是普通文件或存在链接：" + file);
         }
     }
@@ -58,7 +59,7 @@ final class TransactionFiles {
 
     /** 原子替换仅用于本工具的机器记录；实例目标发布使用不覆盖的移动。 */
     static void write(Path file, Object value) throws IOException {
-        if (!file.getParent().toRealPath().equals(file.getParent())) throw new IOException("台账目录已发生链接变化");
+        if (!PathSafety.isDirectory(file.getParent())) throw new IOException("台账目录已发生链接变化");
         if (Files.exists(file, NOFOLLOW_LINKS)) regular(file);
         Path temp = file.resolveSibling(file.getFileName() + ".tmp-" + UUID.randomUUID());
         try {
