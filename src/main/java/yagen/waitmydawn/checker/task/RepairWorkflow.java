@@ -105,7 +105,7 @@ public final class RepairWorkflow {
      */
     public static State readHistoryEntry(GameInstance instance, Path path) throws IOException {
         Path directory = InstanceStorage.directory(InstanceStorage.root(instance, false), "workflows", false);
-        if (!path.getParent().toAbsolutePath().normalize().equals(directory.toAbsolutePath().normalize())) {
+        if (!PathSafety.samePath(path.getParent(), directory)) {
             throw new IOException("修复会话文件不在实例台账目录");
         }
         String name = path.getFileName().toString();
@@ -481,7 +481,9 @@ public final class RepairWorkflow {
 
         private GameInstance fresh() throws IOException {
             GameInstance current = InstanceScanner.scanOne(instance.gameRoot(), instance.dir());
-            if (current == null || !current.versionJson().toRealPath().equals(instance.versionJson().toRealPath())) throw new IOException("无法识别原实例版本文件，请重新扫描");
+            if (current == null || !PathSafety.samePath(current.versionJson(), instance.versionJson())) {
+                throw new IOException("无法识别原实例版本文件，请重新扫描");
+            }
             return current;
         }
 

@@ -625,6 +625,6 @@ public final class RecoveryIntegrity {
     }
 
     private static boolean samePath(Path left, Path right) {
-        return left.toAbsolutePath().normalize().equals(right.toAbsolutePath().normalize());
+        return PathSafety.samePath(left, right);
     }
 }

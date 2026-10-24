@@ -3,6 +3,7 @@ package yagen.waitmydawn.checker.task;
 import yagen.waitmydawn.checker.core.CheckerEngine;
 import yagen.waitmydawn.checker.core.GameInstance;
 import yagen.waitmydawn.checker.core.InstanceScanner;
+import yagen.waitmydawn.checker.core.PathSafety;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -52,7 +53,7 @@ public final class CheckerTasks {
         return context -> {
             context.phase(TaskSnapshot.Phase.PRECHECK, "正在重新读取实例元数据");
             GameInstance current = InstanceScanner.scanOne(instance.gameRoot(), instance.dir());
-            if (current == null || !current.versionJson().toRealPath().equals(instance.versionJson().toRealPath())) {
+            if (current == null || !PathSafety.samePath(current.versionJson(), instance.versionJson())) {
                 throw new java.io.IOException("实例版本文件已变化或无法识别，请重新扫描实例");
             }
             var report = CheckerEngine.checkDetailed(current, toolRoot, options, context::log, context);

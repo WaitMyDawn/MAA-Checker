@@ -1,6 +1,7 @@
 package yagen.waitmydawn.checker.transaction;
 
 import yagen.waitmydawn.checker.core.GameInstance;
+import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.core.InstanceStorage;
 import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.core.RepairInputs;
@@ -83,7 +84,8 @@ public final class TransactionSession implements AutoCloseable {
             sessionDir = TransactionFiles.directory(instanceStore, sessionId.toString(), create);
             if (create) {
                 long createdAt = Math.max(System.currentTimeMillis(), previousSessions.stream().mapToLong(h -> h.header().createdAt()).max().orElse(0) + 1);
-                int layout = Path.of(identity.modsDirectory()).equals(Path.of(identity.directory()).resolve("mods")) ? 2 : 0;
+                int layout = PathSafety.samePath(Path.of(identity.modsDirectory()),
+                        Path.of(identity.directory()).resolve("mods")) ? 2 : 0;
                 header = new Header(1, sessionId, identity, createdAt, layout);
                 TransactionFiles.write(sessionDir.resolve("session.json"), header);
             } else {

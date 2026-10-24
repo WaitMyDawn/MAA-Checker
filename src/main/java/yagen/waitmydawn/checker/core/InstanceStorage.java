@@ -25,7 +25,7 @@ public final class InstanceStorage {
         return directory(path, "libraries", create);
     }
     public static void requireIsolatedMods(GameInstance instance) throws IOException {
-        if (!instance.modsDir().toRealPath().equals(instance.dir().toRealPath().resolve("mods"))) {
+        if (!PathSafety.samePath(instance.modsDir(), instance.dir().resolve("mods"))) {
             throw new IOException("该实例使用共享 mods 目录。请先在启动器开启实例隔离，再进行自动修复，以免影响其他实例。");
         }
     }

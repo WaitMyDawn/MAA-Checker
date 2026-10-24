@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import yagen.waitmydawn.checker.core.GameInstance;
+import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.core.RepairInputs;
 import yagen.waitmydawn.checker.core.RunJournal;
 import yagen.waitmydawn.checker.transaction.InstanceIdentity;
@@ -55,11 +56,12 @@ class StorageReclaimTest {
                 .toList();
 
         StorageReclaim.Plan preview = StorageReclaim.previewOrphans(tool, instance, () -> { });
-        assertTrue(preview.files().stream().anyMatch(item -> item.path().equals(orphan)));
-        assertTrue(preview.files().stream().anyMatch(item -> item.path().equals(runtimeOrphan)));
-        assertTrue(preview.files().stream().anyMatch(item -> item.path().equals(reportOrphan)));
+        assertTrue(preview.files().stream().anyMatch(item -> PathSafety.samePath(item.path(), orphan)));
+        assertTrue(preview.files().stream().anyMatch(item -> PathSafety.samePath(item.path(), runtimeOrphan)));
+        assertTrue(preview.files().stream().anyMatch(item -> PathSafety.samePath(item.path(), reportOrphan)));
         for (Path path : referenced) {
-            assertFalse(preview.files().stream().anyMatch(item -> item.path().equals(path)), path.toString());
+            assertFalse(preview.files().stream()
+                    .anyMatch(item -> PathSafety.samePath(item.path(), path)), path.toString());
         }
 
         StorageReclaim.cleanOrphans(tool, instance, preview, () -> { });
@@ -205,7 +207,7 @@ class StorageReclaimTest {
         Files.writeString(orphan, "before");
         StorageReclaim.Plan preview = StorageReclaim.previewOrphans(tool, instance, () -> { });
         StorageReclaim.Item item = preview.files().stream()
-                .filter(value -> value.path().equals(orphan))
+                .filter(value -> PathSafety.samePath(value.path(), orphan))
                 .findFirst().orElseThrow();
 
         Files.writeString(orphan, "changed");
@@ -256,8 +258,10 @@ class StorageReclaimTest {
         Path unknown = Files.writeString(objects.resolve("unrecognized.tmp"), "unknown");
 
         StorageReclaim.Plan preview = StorageReclaim.previewOrphans(tool, instance, () -> { });
-        assertFalse(preview.files().stream().anyMatch(item -> item.path().equals(protectedObject)));
-        assertFalse(preview.files().stream().anyMatch(item -> item.path().equals(unknown)));
+        assertFalse(preview.files().stream()
+                .anyMatch(item -> PathSafety.samePath(item.path(), protectedObject)));
+        assertFalse(preview.files().stream()
+                .anyMatch(item -> PathSafety.samePath(item.path(), unknown)));
 
         Path outside = Files.createDirectories(temp.resolve("outside"));
         Path link = objects.resolve("linked");
@@ -291,9 +295,11 @@ class StorageReclaimTest {
         Files.move(transactions.resolve(transaction.toString()), hiddenTransaction);
 
         StorageReclaim.Plan preview = StorageReclaim.previewOrphans(tool, instance, () -> { });
-        assertTrue(preview.files().stream().anyMatch(item -> item.path().equals(hiddenWorkflow)));
         assertTrue(preview.files().stream()
-                .anyMatch(item -> item.path().startsWith(hiddenTransaction)));
+                .anyMatch(item -> PathSafety.samePath(item.path(), hiddenWorkflow)));
+        assertTrue(preview.files().stream()
+                .anyMatch(item -> PathSafety.canonical(item.path())
+                        .startsWith(PathSafety.canonical(hiddenTransaction))));
         StorageReclaim.cleanOrphans(tool, instance, preview, () -> { });
         assertFalse(Files.exists(hiddenWorkflow));
         assertFalse(Files.exists(hiddenTransaction));
@@ -325,7 +331,8 @@ class StorageReclaimTest {
         assertTrue(Files.exists(transactionDirectory));
 
         StorageReclaim.Plan residue = StorageReclaim.previewOrphans(tool, instance, () -> { });
-        assertTrue(residue.files().stream().anyMatch(item -> item.path().equals(hiddenWorkflow)));
+        assertTrue(residue.files().stream()
+                .anyMatch(item -> PathSafety.samePath(item.path(), hiddenWorkflow)));
         StorageReclaim.cleanOrphans(tool, instance, residue, () -> { });
         assertFalse(Files.exists(hiddenWorkflow));
         assertFalse(Files.exists(transactionDirectory));

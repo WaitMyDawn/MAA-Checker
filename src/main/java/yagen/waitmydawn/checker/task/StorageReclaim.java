@@ -101,10 +101,10 @@ public final class StorageReclaim {
         }
 
         Path reportsRoot = toolRoot.resolve("logs").resolve(RunJournal.safeName(instance.name()));
-        Set<Path> reportRefs = new HashSet<>();
-        for (Path path : refs.reports()) reportRefs.add(path.toAbsolutePath().normalize());
+        Set<String> reportRefs = new HashSet<>();
+        for (Path path : refs.reports()) reportRefs.add(PathSafety.key(path));
         for (Path file : regularFiles(reportsRoot, checkpoint)) {
-            if (!reportRefs.contains(file.toAbsolutePath().normalize()) && !sensitive(file)) {
+            if (!reportRefs.contains(PathSafety.key(file)) && !sensitive(file)) {
                 files.add(item(file, "未被轮次引用的报告或日志"));
             }
         }
@@ -190,7 +190,7 @@ public final class StorageReclaim {
 
             Path workflow = InstanceStorage.root(instance, false).resolve("workflows")
                     .resolve(current.branch() + ".json");
-            if (current.files().stream().noneMatch(value -> value.path().equals(workflow))) {
+            if (current.files().stream().noneMatch(value -> PathSafety.samePath(value.path(), workflow))) {
                 throw new IOException("回收计划缺少历史分支记录");
             }
             Path hiddenWorkflow = workflow.resolveSibling(workflow.getFileName() + ".reclaimed");
@@ -431,8 +431,10 @@ public final class StorageReclaim {
         for (RepairWorkflow.State state : refs.sessions()) {
             visible.addAll(WorkflowReconciler.associations(state));
         }
-        Set<Path> seenFiles = new HashSet<>(files.stream().map(Item::path).toList());
-        Set<Path> seenDirectories = new HashSet<>(directories);
+        Set<String> seenFiles = new HashSet<>(files.stream()
+                .map(value -> PathSafety.key(value.path())).toList());
+        Set<String> seenDirectories = new HashSet<>(directories.stream()
+                .map(PathSafety::key).toList());
 
         try (var entries = Files.list(workflowRoot)) {
             for (Path entry : entries.toList()) {
@@ -469,11 +471,11 @@ public final class StorageReclaim {
                         if (sensitive(file)) {
                             throw new IOException("中断分支的事务备份包含受保护文件，拒绝回收");
                         }
-                        if (seenFiles.add(file.toAbsolutePath().normalize())) {
+                        if (seenFiles.add(PathSafety.key(file))) {
                             files.add(item(file, "上次清理残留"));
                         }
                     }
-                    if (seenDirectories.add(directory.toAbsolutePath().normalize())) {
+                    if (seenDirectories.add(PathSafety.key(directory))) {
                         directories.add(directory);
                     }
                 }
@@ -513,11 +515,12 @@ public final class StorageReclaim {
 
     private static void deleteTransactionFiles(Path originalRoot, Path hiddenRoot,
                                                List<Item> files, Runnable checkpoint) throws IOException {
-        Path normalizedOriginal = originalRoot.toAbsolutePath().normalize();
+        Path normalizedOriginal = PathSafety.canonical(originalRoot);
         for (Item value : files) {
-            if (!value.path().startsWith(normalizedOriginal)) continue;
+            Path canonical = PathSafety.canonical(value.path());
+            if (!canonical.startsWith(normalizedOriginal)) continue;
             checkpoint.run();
-            Path moved = hiddenRoot.resolve(normalizedOriginal.relativize(value.path())).normalize();
+            Path moved = hiddenRoot.resolve(normalizedOriginal.relativize(canonical)).normalize();
             verifyAt(value, moved);
             Files.delete(moved);
         }
@@ -531,7 +534,7 @@ public final class StorageReclaim {
         Path absolute = root.toAbsolutePath().normalize();
         boolean reclaimed = absolute.getFileName().toString().startsWith(".reclaimed-");
         boolean interruptedTransaction = absolute.getParent() != null
-                && absolute.getParent().equals(sessionRoot.toAbsolutePath().normalize())
+                && PathSafety.samePath(absolute.getParent(), sessionRoot)
                 && isUuid(absolute.getFileName().toString());
         if (!reclaimed && !interruptedTransaction) {
             throw new IOException("只删除明确的回收残留目录");
@@ -568,7 +571,7 @@ public final class StorageReclaim {
 
     private static void validateTransactionDirectory(Path sessionRoot, Path directory) throws IOException {
         Path normalized = directory.toAbsolutePath().normalize();
-        if (!normalized.getParent().equals(sessionRoot.toAbsolutePath().normalize())
+        if (!PathSafety.samePath(normalized.getParent(), sessionRoot)
                 || !isUuid(normalized.getFileName().toString())) {
             throw new IOException("事务回收目录不在当前实例事务根内：" + directory);
         }

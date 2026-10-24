@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -20,5 +21,15 @@ class PathSafetyTest {
         assertTrue(PathSafety.isDirectory(directory));
         assertTrue(PathSafety.isRegularFile(file));
         assertFalse(PathSafety.containsLink(file));
+    }
+
+    @Test
+    void 规范路径比较兼容短路径与真实路径() throws Exception {
+        Path full = temp.toRealPath();
+
+        assertTrue(PathSafety.samePath(temp, full));
+        assertEquals(PathSafety.key(full), PathSafety.key(temp));
+        assertTrue(PathSafety.canonical(temp.resolve("not-created")).startsWith(
+                PathSafety.canonical(temp)));
     }
 }

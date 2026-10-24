@@ -164,11 +164,11 @@ public final class StorageInventory {
 
         Path reportsRoot = toolRoot.resolve("logs").resolve(RunJournal.safeName(instance.name()));
         FileSet reports = FileSet.empty();
-        Set<Path> normalizedReports = new HashSet<>();
-        for (Path report : sessions.reports()) normalizedReports.add(report.toAbsolutePath().normalize());
+        Set<String> normalizedReports = new HashSet<>();
+        for (Path report : sessions.reports()) normalizedReports.add(PathSafety.key(report));
         for (Item item : scanTree(reportsRoot, issues, checkpoint)) {
             if (sensitive(item.path())) reports.unknown.add(item);
-            else if (normalizedReports.contains(item.path().toAbsolutePath().normalize())) reports.protectedFiles.add(item);
+            else if (normalizedReports.contains(PathSafety.key(item.path()))) reports.protectedFiles.add(item);
             else reports.candidate.add(item);
         }
         categories.add(category("reports", "运行报告与日志",

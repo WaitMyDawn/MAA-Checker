@@ -3,6 +3,7 @@ package yagen.waitmydawn.checker.task;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import yagen.waitmydawn.checker.core.GameInstance;
 import yagen.waitmydawn.checker.core.InstanceScanner;
+import yagen.waitmydawn.checker.core.PathSafety;
 import yagen.waitmydawn.checker.transaction.ActionRecord;
 import yagen.waitmydawn.checker.transaction.InstanceIdentity;
 
@@ -70,7 +71,9 @@ public final class WorkflowHistoryIndex {
             old = new Registry(1, List.of());
         }
         Map<String, KnownInstance> known = new LinkedHashMap<>();
-        for (KnownInstance item : old.instances()) known.put(key(Path.of(item.directory())), item);
+        for (KnownInstance item : old.instances()) {
+            known.put(PathSafety.key(Path.of(item.directory())), item);
+        }
         long now = System.currentTimeMillis();
         for (GameInstance instance : instances) {
             String instanceId;
@@ -79,8 +82,8 @@ public final class WorkflowHistoryIndex {
             } catch (IOException e) {
                 instanceId = "";
             }
-            Path directory = instance.dir().toAbsolutePath().normalize();
-            known.put(key(directory), new KnownInstance(instanceId, instance.name(), directory.toString(),
+            Path directory = PathSafety.canonical(instance.dir());
+            known.put(PathSafety.key(directory), new KnownInstance(instanceId, instance.name(), directory.toString(),
                     sessionIds(instance), now));
         }
         List<KnownInstance> sorted = known.values().stream()
@@ -102,10 +105,12 @@ public final class WorkflowHistoryIndex {
             quarantine(index);
             old = new Registry(1, List.of());
         }
-        String oldKey = key(oldDirectory);
         Map<String, KnownInstance> known = new LinkedHashMap<>();
         for (KnownInstance item : old.instances()) {
-            if (!key(Path.of(item.directory())).equals(oldKey)) known.put(key(Path.of(item.directory())), item);
+            Path directory = Path.of(item.directory());
+            if (!PathSafety.samePath(directory, oldDirectory)) {
+                known.put(PathSafety.key(directory), item);
+            }
         }
         String instanceId;
         try {
@@ -113,8 +118,8 @@ public final class WorkflowHistoryIndex {
         } catch (IOException e) {
             instanceId = "";
         }
-        Path directory = instance.dir().toAbsolutePath().normalize();
-        known.put(key(directory), new KnownInstance(instanceId, instance.name(), directory.toString(),
+        Path directory = PathSafety.canonical(instance.dir());
+        known.put(PathSafety.key(directory), new KnownInstance(instanceId, instance.name(), directory.toString(),
                 sessionIds(instance), System.currentTimeMillis()));
         List<KnownInstance> sorted = known.values().stream()
                 .sorted(Comparator.comparingLong(KnownInstance::lastSeen).reversed())
@@ -141,17 +146,19 @@ public final class WorkflowHistoryIndex {
         }
 
         Map<String, GameInstance> currentByPath = new LinkedHashMap<>();
-        for (GameInstance instance : current) currentByPath.put(key(instance.dir()), instance);
+        for (GameInstance instance : current) {
+            currentByPath.put(PathSafety.key(instance.dir()), instance);
+        }
 
         for (KnownInstance item : known) {
-            Path directory = Path.of(item.directory()).toAbsolutePath().normalize();
-            if (currentByPath.containsKey(key(directory))) continue;
+            Path directory = PathSafety.canonical(Path.of(item.directory()));
+            if (currentByPath.containsKey(PathSafety.key(directory))) continue;
             if (!Files.isDirectory(directory)) continue;
             Path versions = directory.getParent();
             Path gameRoot = versions == null ? null : versions.getParent();
             if (gameRoot == null) continue;
             GameInstance found = InstanceScanner.scanOne(gameRoot, directory);
-            if (found != null) currentByPath.put(key(directory), found);
+            if (found != null) currentByPath.put(PathSafety.key(directory), found);
         }
 
         List<Entry> entries = new ArrayList<>();
@@ -324,9 +331,4 @@ public final class WorkflowHistoryIndex {
         return toolRoot.toAbsolutePath().normalize().resolve("state").resolve(INDEX);
     }
 
-    private static String key(Path path) {
-        String value = path.toAbsolutePath().normalize().toString();
-        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")
-                ? value.toLowerCase(Locale.ROOT) : value;
-    }
 }

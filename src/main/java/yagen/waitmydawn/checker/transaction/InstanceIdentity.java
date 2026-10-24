@@ -1,6 +1,7 @@
 package yagen.waitmydawn.checker.transaction;
 
 import yagen.waitmydawn.checker.core.GameInstance;
+import yagen.waitmydawn.checker.core.PathSafety;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -16,7 +17,8 @@ public record InstanceIdentity(String id, String directory, String modsDirectory
         Path directory = instance.dir().toRealPath();
         Path mods = instance.modsDir().toRealPath();
         Path requested = instance.versionJson().toAbsolutePath().normalize();
-        if (!requested.getParent().toRealPath().equals(directory) || !requested.getFileName().toString().endsWith(".json")) {
+        if (!PathSafety.samePath(requested.getParent(), directory)
+                || !requested.getFileName().toString().endsWith(".json")) {
             throw new IOException("版本元数据必须位于实例根目录");
         }
         Path version = directory.resolve(requested.getFileName());
