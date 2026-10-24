@@ -36,6 +36,7 @@ class ModTomlTest {
         assertEquals(1, mods.size(), "内联数组里那一个模组必须被读出来");
         assertEquals("mr_panda_temple", mods.get(0).modId());
         assertEquals("1-V1-1.21+", mods.get(0).version(), "声明版本要原样保留（L4 归因靠它反查）");
+        assertEquals("Panda Temple", mods.get(0).displayName());
     }
 
     @Test

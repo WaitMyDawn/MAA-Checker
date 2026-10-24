@@ -37,11 +37,17 @@ public final class InstanceScanner {
 
     /** 扫描游戏目录下的全部实例（按名字排序，保证可复现） */
     public static List<GameInstance> scanAll(Path gameDir) throws IOException {
+        return scanAll(gameDir, () -> { });
+    }
+
+    public static List<GameInstance> scanAll(Path gameDir, Runnable checkpoint) throws IOException {
+        checkpoint.run();
         Path versions = gameDir.resolve("versions");
         if (!Files.isDirectory(versions)) return List.of();
         List<GameInstance> out = new ArrayList<>();
         try (Stream<Path> dirs = Files.list(versions)) {
             for (Path dir : dirs.filter(Files::isDirectory).sorted().toList()) {
+                checkpoint.run();
                 GameInstance inst = scanOne(gameDir, dir);
                 if (inst != null) out.add(inst);
             }
@@ -51,6 +57,7 @@ public final class InstanceScanner {
             int c = Boolean.compare(b.looksLikeModpack(), a.looksLikeModpack());
             return c != 0 ? c : a.name().compareTo(b.name());
         });
+        checkpoint.run();
         return out;
     }
 

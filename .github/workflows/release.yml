@@ -1,7 +1,7 @@
 name: release
 
 # 发版只有两个入口：
-#   1) 打 tag（主路径）：git push origin v0.2.0   → 自动打包并把三份产物发到 Releases
+#   1) 打 tag（主路径）：git push origin v0.2.0   → 自动打包并把桌面产物发到 Releases
 #   2) 手动兜底：Actions 页面 Run workflow（填同一个版本号即可补发，Release 已存在时覆盖资产）
 #
 # 版本号规则（tag 就是唯一真相）：
@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   release:
-    name: 打包并发布（exe / lite / 自带运行时）
+    name: 打包并发布（自带运行时桌面版与轻量版）
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,17 +61,21 @@ jobs:
       - name: 单测（门禁：不通过就不发版）
         run: mvn -B -ntp test
 
-      - name: 打包三份产物（exe + lite + 自带运行时）
+      - name: 打包桌面版与轻量 EXE
         shell: pwsh
         run: |
           # 与本地完全同一套脚本；CI 上没有兄弟目录的 mvnw，所以传 -Mvn mvn
           powershell -ExecutionPolicy Bypass -File package.ps1 `
-            -Version $env:VERSION -WithJre -Mvn mvn -NoOffline
+            -Version $env:VERSION -Mvn mvn -NoOffline
 
       - name: 生成校验和 SHA256SUMS.txt
         shell: pwsh
         run: |
-          $lines = Get-ChildItem "dist/MAA-Checker-$env:VERSION-*.zip" | ForEach-Object {
+          $files = @(
+            "dist/MAA-Checker-$env:VERSION-desktop-win-x64.zip",
+            "dist/MAA-Checker-$env:VERSION-light-win-x64.exe"
+          )
+          $lines = $files | Get-Item | ForEach-Object {
             "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           }
           $lines | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
@@ -84,9 +88,8 @@ jobs:
         run: |
           $tag = "v$env:VERSION"
           $assets = @(
-            "dist/MAA-Checker-$env:VERSION-win-x64.zip",
-            "dist/MAA-Checker-$env:VERSION-lite.zip",
-            "dist/MAA-Checker-$env:VERSION-win-x64-jre.zip",
+            "dist/MAA-Checker-$env:VERSION-desktop-win-x64.zip",
+            "dist/MAA-Checker-$env:VERSION-light-win-x64.exe",
             "dist/SHA256SUMS.txt"
           )
           foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "缺少产物: $a" } }

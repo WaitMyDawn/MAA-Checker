@@ -73,24 +73,7 @@ public final class LoaderPatch {
         Path instJson = inst.versionJson();
         ObjectNode root = (ObjectNode) MAPPER.readTree(
                 Files.readString(instJson, StandardCharsets.UTF_8));
-        JsonNode patchesNode = root.path("patches");
-        if (!patchesNode.isArray() || patchesNode.isEmpty()) {
-            throw new IllegalStateException("实例版本 JSON 里没有 patches[]，不是 HMCL 的 root+patches 结构；"
-                    + "为避免改坏，本工具拒绝就地改加载器。");
-        }
-        ArrayNode patches = (ArrayNode) patchesNode;
-        int idx = -1;
-        for (int i = 0; i < patches.size(); i++) {
-            String id = patches.get(i).path("id").asText("");
-            if ("neoforge".equals(id) || "forge".equals(id)) {
-                idx = i;
-                break;
-            }
-        }
-        if (idx < 0) {
-            throw new IllegalStateException("patches[] 里没找到加载器补丁（neoforge/forge），拒绝改。");
-        }
-        ObjectNode oldPatch = (ObjectNode) patches.get(idx);
+        validateLayout(root);
 
         // ---------- 1) installer ----------
         String installerUrl = "https://maven.neoforged.net/releases/net/neoforged/neoforge/"
@@ -113,7 +96,7 @@ public final class LoaderPatch {
         // ---------- 1b) 装到游戏目录，但把"我们造出来的东西"精确记下来，装完即清 ----------
         //
         // 这里刻意**不再使用沙盒 + junction**（2026-09-22 事故复盘）：
-        // 曾经的做法是"installer 指向软件目录下的沙盒，沙盒里 libraries 用 junction 指回真实目录"，
+// 曾经的做法是"installer 指向软件目录下的沙盒，沙盒里 libraries 用 junction 指回实际目录"，
         // 虽然能实现"游戏目录零残留"，但它引入了一个致命风险——
         // **任何递归删除（Remove-Item -Recurse / rd /s）都会穿透 junction，把真实 libraries 删空**，
         // 实测已经发生过一次（用户清理沙盒时整个 libraries 被清空，所有实例都起不来）。
@@ -205,45 +188,7 @@ public final class LoaderPatch {
             throw new IllegalStateException("installer 没有产出预期文件: " + produced);
         }
         ObjectNode nf = (ObjectNode) MAPPER.readTree(Files.readString(produced, StandardCharsets.UTF_8));
-        JsonNode oldPatchCopy = oldPatch.deepCopy();
-        ObjectNode newPatch = MAPPER.createObjectNode();
-        newPatch.put("id", oldPatch.path("id").asText("neoforge"));
-        newPatch.put("version", targetVersion);
-        newPatch.put("priority", oldPatch.path("priority").asInt(30000));
-        for (String f : List.of("mainClass", "inheritsFrom", "type", "time", "releaseTime", "arguments",
-                "libraries")) {
-            if (nf.has(f)) newPatch.set(f, nf.get(f));
-        }
-        patches.set(idx, newPatch);
-
-        // ---------- 3) 平铺字段做差量 ----------
-        ObjectNode args = (ObjectNode) root.path("arguments");
-        List<String> newJvm = textual(args, nf, "jvm");
-        List<String> newGame = textual(args, nf, "game");
-        if (newJvm.isEmpty() && newGame.isEmpty()) {
-            throw new IllegalStateException("installer 产出的 JSON 里没有可用的 arguments，拒绝写坏实例 JSON");
-        }
-        int removedJvm = dropTokens((ArrayNode) args.path("jvm"), LOADER_JVM_PREFIXES, LOADER_JVM_FLAGS);
-        int removedGame = dropTokens((ArrayNode) args.path("game"), Set.of(), LOADER_GAME_FLAGS);
-        ArrayNode jvm = (ArrayNode) args.path("jvm");
-        newJvm.forEach(jvm::add);
-        ArrayNode game = (ArrayNode) args.path("game");
-        newGame.forEach(game::add);
-
-        int removedLibs = dropLibraries((ArrayNode) root.path("libraries"),
-                oldPatchCopy.path("libraries"));
-        ArrayNode libs = (ArrayNode) root.path("libraries");
-        Set<String> have = new LinkedHashSet<>();
-        for (JsonNode l : libs) have.add(l.path("name").asText());
-        int addedLibs = 0;
-        for (JsonNode l : newPatch.path("libraries")) {
-            if (have.add(l.path("name").asText())) {
-                libs.add(l);
-                addedLibs++;
-            }
-        }
-        String mainClass = newPatch.path("mainClass").asText("");
-        if (!mainClass.isBlank()) root.put("mainClass", mainClass);
+        root = compose(root, nf, targetVersion);
 
         // ---------- 4) 备份后写回 ----------
         String backupStamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
@@ -252,9 +197,7 @@ public final class LoaderPatch {
         Files.copy(instJson, backup, StandardCopyOption.REPLACE_EXISTING);
         Files.writeString(instJson, MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root),
                 StandardCharsets.UTF_8);
-        log.accept("   已就地更新实例 JSON：删除旧加载器参数 jvm=" + removedJvm + "/game=" + removedGame
-                + "，日志库 " + removedLibs + " 个，新增 " + addedLibs + " 个；备份 "
-                + backup.getFileName());
+        log.accept("   已更新加载器补丁、参数与依赖库；备份 " + backup.getFileName());
 
         // ---------- 5) 清理"我们这次新造出来的东西"（只有走到这里才算成功）----------
         //
@@ -295,6 +238,67 @@ public final class LoaderPatch {
         return data;
     }
 
+    public static void validateLayout(JsonNode root) throws IOException {
+        if (!root.isObject() || !root.path("patches").isArray() || !root.path("arguments").isObject()
+                || !root.path("arguments").path("jvm").isArray() || !root.path("arguments").path("game").isArray()
+                || !root.path("libraries").isArray()) throw new IOException("实例不是可安全合并的 HMCL patches/arguments/libraries 结构");
+        int count = 0;
+        for (var patch : root.path("patches")) {
+            String id = patch.path("id").asText();
+            if (id.equals("neoforge") || id.equals("forge")) count++;
+        }
+        if (count != 1) throw new IOException("实例必须恰好包含一个加载器补丁");
+    }
+
+    /** 复用差量合并规则，但不修改输入节点或文件；写入由调用入口选择事务协议。 */
+    public static ObjectNode compose(JsonNode original, JsonNode produced, String version) throws IOException {
+        validateLayout(original);
+        if (!produced.isObject() || produced.path("mainClass").asText().isBlank() || !produced.path("libraries").isArray()) {
+            throw new IOException("installer 产物缺少有效的主类或依赖库");
+        }
+        ObjectNode root = original.deepCopy();
+        ArrayNode patches = (ArrayNode) root.path("patches");
+        int index = 0;
+        while (!Set.of("neoforge", "forge").contains(patches.get(index).path("id").asText())) index++;
+        JsonNode old = patches.get(index);
+        ObjectNode patch = MAPPER.createObjectNode();
+        patch.put("id", old.path("id").asText());
+        patch.put("version", version);
+        patch.put("priority", old.path("priority").asInt(30000));
+        for (String field : List.of("mainClass", "inheritsFrom", "type", "time", "releaseTime", "arguments", "libraries")) {
+            if (produced.has(field)) patch.set(field, produced.get(field).deepCopy());
+        }
+        ObjectNode args = (ObjectNode) root.path("arguments");
+        List<String> jvm = textual(produced, "jvm");
+        List<String> game = textual(produced, "game");
+        if (jvm.isEmpty() && game.isEmpty()) throw new IOException("installer 没有可用启动参数，拒绝生成候选");
+        dropTokens((ArrayNode) args.path("jvm"), LOADER_JVM_PREFIXES, LOADER_JVM_FLAGS);
+        dropTokens((ArrayNode) args.path("game"), Set.of(), LOADER_GAME_FLAGS);
+        jvm.forEach(((ArrayNode) args.path("jvm"))::add);
+        game.forEach(((ArrayNode) args.path("game"))::add);
+        // HMCL resolves patch-based version JSON from the patch layers and may ignore the
+        // top-level arguments. MAA-Checker reads the top level directly, so both layers need
+        // the override for BOM-prefixed Mixin configs to behave consistently.
+        ensureUtf8((ArrayNode) args.path("jvm"));
+        ArrayNode patchArguments = patch.withObject("arguments").withArray("jvm");
+        ensureUtf8(patchArguments);
+        ArrayNode libs = (ArrayNode) root.path("libraries");
+        dropLibraries(libs, old.path("libraries"));
+        Set<String> have = new LinkedHashSet<>();
+        libs.forEach(lib -> have.add(lib.path("name").asText()));
+        for (var lib : patch.path("libraries")) if (have.add(lib.path("name").asText())) libs.add(lib.deepCopy());
+        root.put("mainClass", produced.path("mainClass").asText());
+        patches.set(index, patch);
+        return root;
+    }
+
+    private static void ensureUtf8(ArrayNode arguments) {
+        for (JsonNode argument : arguments) {
+            if (argument.isTextual() && argument.asText().equals("-Dfile.encoding=UTF-8")) return;
+        }
+        arguments.add("-Dfile.encoding=UTF-8");
+    }
+
     /** 越界检查：路径解析后的真实位置必须仍在游戏目录内（防止链接把删除引到别处） */
     static boolean insideGameRoot(Path path, Path gameRoot) {
         try {
@@ -307,7 +311,7 @@ public final class LoaderPatch {
     }
 
     /** 取产出 JSON 里 arguments.<group> 的纯字符串参数（rules 对象一律不搬：那是启动器能力，不是加载器要求） */
-    private static List<String> textual(ObjectNode targetArgs, ObjectNode nf, String group) {
+    private static List<String> textual(JsonNode nf, String group) {
         List<String> out = new ArrayList<>();
         for (JsonNode a : nf.path("arguments").path(group)) {
             if (a.isTextual()) {
@@ -444,7 +448,7 @@ public final class LoaderPatch {
                 if (Files.exists(junction)) {
                     if (log != null) {
                         log.accept("   ⚠️ libraries 链接未能删除，已放弃清理沙盒"
-                                + "（宁可留垃圾也不能误删真实 libraries）: " + junction);
+                    + "（宁可留垃圾也不能误删实际 libraries）: " + junction);
                     }
                     return false;
                 }

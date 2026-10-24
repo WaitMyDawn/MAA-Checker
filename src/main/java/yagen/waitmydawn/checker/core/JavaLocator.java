@@ -1,5 +1,7 @@
 package yagen.waitmydawn.checker.core;
 
+import yagen.waitmydawn.checker.task.ProcessScope;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,6 +38,7 @@ public final class JavaLocator {
     /** 找到满足 major 需求的最低候选（优先顺序见类注释） */
     public static JavaHome find(int requiredMajor, Path toolRoot) {
         for (Path candidate : candidates(toolRoot)) {
+            checkInterrupted();
             JavaHome home = probe(candidate);
             if (home != null && home.major() >= requiredMajor) return home;
         }
@@ -46,6 +49,7 @@ public final class JavaLocator {
     public static List<JavaHome> listAll(Path toolRoot) {
         List<JavaHome> out = new ArrayList<>();
         for (Path candidate : candidates(toolRoot)) {
+            checkInterrupted();
             JavaHome home = probe(candidate);
             if (home != null && out.stream().noneMatch(h -> h.javaExe().equals(home.javaExe()))) out.add(home);
         }
@@ -92,10 +96,10 @@ public final class JavaLocator {
         } catch (Exception e) {
             return null;
         }
-        try {
-            Process p = new ProcessBuilder(javaExe.toString(), "-version").redirectErrorStream(true).start();
+        try (var processes = new ProcessScope()) {
+            Process p = processes.start(new ProcessBuilder(javaExe.toString(), "-version").redirectErrorStream(true));
+            if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) return null;
             String text = new String(p.getInputStream().readAllBytes());
-            p.waitFor();
             Matcher m = VERSION.matcher(text);
             if (!m.find()) return null;
             int major = Integer.parseInt(m.group(1));
@@ -105,9 +109,20 @@ public final class JavaLocator {
                 if (legacy.find()) major = Integer.parseInt(legacy.group(1));
             }
             return new JavaHome(javaExe, major, text.lines().findFirst().orElse("").trim());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            var cancelled = new java.util.concurrent.CancellationException("Java 探测已停止");
+            cancelled.initCause(e);
+            throw cancelled;
+        } catch (java.util.concurrent.CancellationException | ProcessScope.CleanupException e) {
+            throw e;
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private static void checkInterrupted() {
+        if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException("Java 探测已停止");
     }
 
     private static boolean isWindows() {

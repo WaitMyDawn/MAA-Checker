@@ -1,5 +1,8 @@
 package yagen.waitmydawn.checker.core;
 
+import yagen.waitmydawn.checker.task.TaskContext;
+import yagen.waitmydawn.checker.task.TaskSnapshot;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import yagen.waitmydawn.checker.action.ActionExecutor;
 import yagen.waitmydawn.checker.action.ActionKind;
@@ -10,6 +13,7 @@ import yagen.waitmydawn.checker.action.PlannedAction;
 import yagen.waitmydawn.checker.action.Restore;
 import yagen.waitmydawn.checker.action.Tombstones;
 import yagen.waitmydawn.checker.net.NetworkManager;
+import yagen.waitmydawn.checker.transaction.WorkflowLease;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -31,7 +35,7 @@ import java.util.function.Consumer;
  */
 public final class CheckerEngine {
 
-    public static final String TOOL_VERSION = "0.1";
+    public static final String TOOL_VERSION = "1.0.0";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final long RECENT_ACTIVITY_MS = 10_000L;
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -40,6 +44,14 @@ public final class CheckerEngine {
     public record Round(GameInstance inst, JavaLocator.JavaHome java, int requiredJava,
                         StaticDepsScanner.Report stat, LaunchSpec spec, LaunchResult launch,
                         Diagnosis diag, Map<String, String> jarIndex) {
+    }
+
+    /** 报告路径与领域结果一同返回，展示层无需解析日志或猜测输出目录。 */
+    public record CheckReport(int exitCode, Path runDirectory, List<Round> rounds, RepairInputs inputs) {
+        public CheckReport { rounds = List.copyOf(rounds); }
+        public CheckReport(int exitCode, Path runDirectory, List<Round> rounds) {
+            this(exitCode, runDirectory, rounds, null);
+        }
     }
 
     /** 修复轮次的默认上限与单次运行的硬上限（硬上限只是"防手滑"，改代码即可放宽） */
@@ -135,7 +147,25 @@ public final class CheckerEngine {
      */
     public static int check(GameInstance inst, Path toolRoot, Options o, Consumer<String> sink)
             throws Exception {
+        return check(inst, toolRoot, o, sink, null);
+    }
+
+    public static int check(GameInstance inst, Path toolRoot, Options o, Consumer<String> sink,
+                            TaskContext context) throws Exception {
+        return checkDetailed(inst, toolRoot, o, sink, context, false).exitCode();
+    }
+
+    public static CheckReport checkDetailed(GameInstance inst, Path toolRoot, Options o,
+                                            Consumer<String> sink, TaskContext context) throws Exception {
+        return checkDetailed(inst, toolRoot, o, sink, context, true);
+    }
+
+    private static CheckReport checkDetailed(GameInstance inst, Path toolRoot, Options o,
+                                             Consumer<String> sink, TaskContext context,
+                                             boolean prepareRepairInputs) throws Exception {
+        RepairInputs inputs = prepareRepairInputs ? RepairInputs.capture(inst) : null;
         RunJournal journal = RunJournal.create(toolRoot, inst.name(), sink);
+        List<Round> rounds = new ArrayList<>();
         try {
             journal.log("=== MAA-Checker " + TOOL_VERSION + " 检验: " + inst.name() + " ===");
             journal.log("时间: " + LocalDateTime.now().format(TIME));
@@ -144,11 +174,14 @@ public final class CheckerEngine {
             int done = 0;
             int times = Math.max(1, o.repeat());
             for (int i = 1; i <= times; i++) {
+                if (context != null) { context.checkpoint(); context.round(i); }
                 Path roundDir = times == 1 ? journal.runDir() : journal.runDir().resolve("run-" + i);
                 if (times > 1) journal.log("──────── 第 " + i + "/" + times + " 次启动 ────────");
-                Round r = runRound(inst, toolRoot, roundDir, journal, o, o.force() || i > 1);
-                if (r == null) return 2;
+                Round r = runRound(inst, toolRoot, roundDir, journal, o, o.force() || i > 1, context);
+                if (r == null) return new CheckReport(2, journal.runDir(), rounds, inputs);
+                if (context != null) context.phase(TaskSnapshot.Phase.REPORTING, "正在生成诊断报告");
                 writeReport(roundDir, r);
+                rounds.add(r);
                 done++;
                 if (r.launch().verdict() == LaunchVerdict.PASS) pass++;
                 journal.log("⑥ 报告: " + roundDir.resolve("report.txt"));
@@ -159,7 +192,7 @@ public final class CheckerEngine {
                         + (pass == done ? "（本轮没复现偶发崩溃；竞态类问题要多跑几次才看得见）"
                         : "（存在偶发失败，请看失败那几轮的 report.txt）"));
             }
-            return pass == done ? 0 : 1;
+            return new CheckReport(pass == done ? 0 : 1, journal.runDir(), rounds, inputs);
         } finally {
             journal.close();
         }
@@ -168,6 +201,12 @@ public final class CheckerEngine {
     /** 跑一轮：静态预检 → Java → 组装命令 → 启动 → 诊断。返回 null 表示前置条件不满足（已写日志） */
     public static Round runRound(GameInstance inst, Path toolRoot, Path roundDir, RunJournal journal,
                                  Options o, boolean force) throws Exception {
+        return runRound(inst, toolRoot, roundDir, journal, o, force, null);
+    }
+
+    public static Round runRound(GameInstance inst, Path toolRoot, Path roundDir, RunJournal journal,
+                                 Options o, boolean force, TaskContext context) throws Exception {
+        if (context != null) context.phase(TaskSnapshot.Phase.PRECHECK, "正在检查实例环境与依赖");
         journal.log("实例: " + inst.describe());
         if (!force && recentlyActive(inst)) {
             journal.log("⛔ logs/latest.log 在 10 秒内还被写过，疑似该实例的游戏正在运行。");
@@ -181,6 +220,7 @@ public final class CheckerEngine {
                 + stat.needsReview().size() + " 条（" + (System.currentTimeMillis() - tStatic) + "ms）");
         stat.highConfidence().forEach(p -> journal.log("   · " + p.describe()));
 
+        if (context != null) context.checkpoint();
         int need = InstanceLauncher.requiredJavaOf(inst);
         JavaLocator.JavaHome java = JavaLocator.find(need, toolRoot);
         if (java == null) {
@@ -190,6 +230,7 @@ public final class CheckerEngine {
         journal.log("② Java: " + java.versionLine() + "（major=" + java.major() + "，需要 " + need
                 + "）@ " + java.javaExe());
 
+        if (context != null) context.phase(TaskSnapshot.Phase.PREPARING_LAUNCH, "正在准备启动参数");
         Files.createDirectories(roundDir);
         LaunchSpec spec = InstanceLauncher.build(inst, java, roundDir.resolve("client-stdout.log"),
                 o.mx(), 854, 480);
@@ -206,7 +247,8 @@ public final class CheckerEngine {
                 + "s，进主菜单后再观察 " + o.graceSeconds() + "s）");
         long launchStart = System.currentTimeMillis();
         LaunchResult result = InstanceLauncher.run(spec, o.timeoutSeconds(), o.graceSeconds(),
-                journal::log);
+                journal::log, context);
+        if (context != null) context.phase(TaskSnapshot.Phase.DIAGNOSING, "正在分析本轮日志与崩溃报告");
         ModJarIndex.Meta meta = ModJarIndex.scanMeta(inst.modsDir());
         Map<String, String> jarIndex = meta.jarOf();
         // 客户端 stdout 也要喂给诊断器：FML 的 "-- Mod loading issue for: X --" 明细只在它里面
@@ -236,7 +278,17 @@ public final class CheckerEngine {
     // 自动修复闭环
     // ==================================================================================
 
+    /** 旧 A/B/C 修复兼容入口；新入口使用 {@code RepairWorkflow} 的策略、快照与事务协议。 */
+    @Deprecated(forRemoval = false)
     public static int fix(GameInstance inst, Path toolRoot, Options o, Consumer<String> sink)
+            throws Exception {
+        InstanceStorage.requireIsolatedMods(inst);
+        try (var lease = WorkflowLease.acquire(inst)) {
+            return fixLocked(inst, toolRoot, o, sink);
+        }
+    }
+
+    private static int fixLocked(GameInstance inst, Path toolRoot, Options o, Consumer<String> sink)
             throws Exception {
         RunJournal journal = RunJournal.create(toolRoot, inst.name(), sink);
         try {
@@ -560,9 +612,14 @@ public final class CheckerEngine {
         Path stateDir = toolRoot.resolve("state").resolve(RunJournal.safeName(inst.name()));
         List<Path> files = new ArrayList<>();
         if (Files.isDirectory(stateDir)) {
+            var roundPattern = java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(session) + "-round-(\\d+)\\.json$");
             try (var s = Files.list(stateDir)) {
-                files = s.filter(p -> p.getFileName().toString().startsWith(session + "-round-"))
-                        .sorted(Comparator.reverseOrder()).toList();
+                files = s.filter(p -> roundPattern.matcher(p.getFileName().toString()).matches())
+                        .sorted(Comparator.<Path>comparingInt(p -> {
+                            var matcher = roundPattern.matcher(p.getFileName().toString());
+                            if (!matcher.matches()) throw new IllegalArgumentException("无效的轮次台账");
+                            return Integer.parseInt(matcher.group(1));
+                        }).reversed()).toList();
             }
         }
         Tombstones tombs = Tombstones.load(stateDir);
@@ -587,6 +644,7 @@ public final class CheckerEngine {
         return d.issues().stream().noneMatch(i -> i.kind() == Diagnosis.Kind.MISSING_REQUIRED
                 || i.kind() == Diagnosis.Kind.LOADER_TOO_OLD
                 || i.kind() == Diagnosis.Kind.MOD_VERSION_MISMATCH
+                || i.kind() == Diagnosis.Kind.ENVIRONMENT
                 // 版本号格式非法是确定性的：同一个 jar 每次都会被解析器拒绝，重试纯属浪费一轮
                 || i.kind() == Diagnosis.Kind.BAD_VERSION_FORMAT);
     }
@@ -596,8 +654,18 @@ public final class CheckerEngine {
     // ==================================================================================
 
     /** @param onlyRound null 表示还原全部历史轮次（从最新往回） */
+    /** 旧台账恢复兼容入口；新入口按工作流和轮次 UUID 生成恢复预览。 */
+    @Deprecated(forRemoval = false)
     public static int restore(GameInstance inst, Path toolRoot, Integer onlyRound,
                               Consumer<String> sink) throws Exception {
+        InstanceStorage.requireIsolatedMods(inst);
+        try (var lease = WorkflowLease.acquire(inst)) {
+            return restoreLocked(inst, toolRoot, onlyRound, sink);
+        }
+    }
+
+    private static int restoreLocked(GameInstance inst, Path toolRoot, Integer onlyRound,
+                                     Consumer<String> sink) throws Exception {
         Path stateDir = toolRoot.resolve("state").resolve(RunJournal.safeName(inst.name()));
         if (!Files.isDirectory(stateDir)) {
             sink.accept("没有找到该实例的改动记录: " + stateDir);
@@ -607,7 +675,7 @@ public final class CheckerEngine {
         }
         List<Item> items = new ArrayList<>();
         try (var s = Files.list(stateDir)) {
-            var pattern = java.util.regex.Pattern.compile("^(?:(\\d{8}-\\d{6})-)?round-(\\d+)\\.json$");
+            var pattern = java.util.regex.Pattern.compile("^(?:(\\d{8}-\\d{6}(?:-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})?)-)?round-(\\d+)\\.json$");
             for (Path p : s.toList()) {
                 var m = pattern.matcher(p.getFileName().toString());
                 if (!m.matches()) continue;

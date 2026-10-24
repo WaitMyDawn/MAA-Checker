@@ -27,12 +27,13 @@ public final class RunJournal {
         this.sink = sink;
     }
 
-    /** 建本轮目录：logs/&lt;实例名&gt;/&lt;yyyyMMdd-HHmmss&gt;/ */
+    /** 独占创建输出目录，避免同秒重试或并发入口覆盖已有报告。 */
     public static RunJournal create(Path toolRoot, String instanceName, Consumer<String> sink)
             throws IOException {
-        Path dir = toolRoot.resolve("logs").resolve(safeName(instanceName))
-                .resolve(STAMP.format(LocalDateTime.now()));
-        Files.createDirectories(dir);
+        Path parent = toolRoot.resolve("logs").resolve(safeName(instanceName));
+        Files.createDirectories(parent);
+        Path dir = parent.resolve(STAMP.format(LocalDateTime.now()) + "-" + java.util.UUID.randomUUID());
+        Files.createDirectory(dir);
         return new RunJournal(dir, sink == null ? m -> { } : sink);
     }
 

@@ -26,3 +26,54 @@ jobs:
 
       - name: 单测
         run: mvn -B -ntp test
+
+  desktop-preview:
+    name: JavaFX 桌面预览验收
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: 核心回归与 JavaFX 图形测试
+        run: mvn -B -ntp -Pdesktop test
+      - name: 保存测试报告和窗口截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-preview-validation
+          path: |
+            target/desktop/surefire-reports/
+            target/desktop-validation/
+
+  package-smoke:
+    name: 桌面版与轻量版打包冒烟
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: 构建自带运行时桌面版与轻量 EXE
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File package.ps1 `
+            -Version 0.0.0 -Mvn mvn -NoOffline
+      - name: 验证完整版无 Java 环境与轻量版单文件启动
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/validate-package.ps1 `
+            -DesktopZip dist/MAA-Checker-0.0.0-desktop-win-x64.zip `
+            -LightExe dist/MAA-Checker-0.0.0-light-win-x64.exe
+      - name: 保存桌面分发产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-package-smoke
+          path: |
+            dist/MAA-Checker-0.0.0-desktop-win-x64.zip
+            dist/MAA-Checker-0.0.0-light-win-x64.exe
+            dist/SHA256SUMS.txt

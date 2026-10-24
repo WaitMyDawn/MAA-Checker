@@ -332,6 +332,46 @@ class LogDiagnoserTest {
         assertEquals(List.of("real_culprit"), removed, "每轮只摘最可信的那一个：" + removed);
     }
 
+    @Test
+    void Java原生库和资源故障不能被堆栈候选误判为模组(@TempDir Path tmp) throws Exception {
+        Path mods = tmp.resolve("mods");
+        Files.createDirectories(mods);
+        writeJar(mods.resolve("citadel-2.7.1.jar"), Map.of(
+                "META-INF/mods.toml", "[[mods]]\nmodId = \"citadel\"\nversion = \"2.7.1\"\n"));
+        List<String> failures = List.of(
+                """
+                Exception in thread "main" java.lang.UnsupportedClassVersionError:
+                    class file version 65.0
+                    at TRANSFORMER/citadel@2.7.1/com.example.Startup.run(Startup.java:1)
+                """,
+                """
+                java.lang.UnsatisfiedLinkError: Failed to initialize GLFW
+                    at TRANSFORMER/citadel@2.7.1/com.example.Renderer.init(Renderer.java:1)
+                """,
+                """
+                net.minecraft.server.ChainedJsonException: Invalid shaders/post/irradiated.json
+                    (mod/alexscaves) passes[2]: File not found
+                    at TRANSFORMER/citadel@2.7.1/com.example.Shader.load(Shader.java:1)
+                """);
+
+        for (String failure : failures) {
+            Path fresh = write(tmp, failure);
+            GameInstance inst = instance(tmp, "neoforge", "21.1.231");
+            ModJarIndex.Meta meta = ModJarIndex.scanMeta(mods);
+            Diagnosis d = LogDiagnoser.diagnose(inst, fresh, List.of(), meta, 0L);
+
+            assertTrue(d.issues().stream().anyMatch(i -> i.kind() == Diagnosis.Kind.ENVIRONMENT),
+                    "环境故障必须被识别：" + d.issues());
+            assertFalse(d.issues().stream().anyMatch(i -> i.kind() == Diagnosis.Kind.STACK_ATTRIBUTED),
+                    "环境故障存在时不能采信模组堆栈候选：" + d.issues());
+            ActionPlan plan = ActionPlanner.plan("neoforge", d, StaticDepsScanner.scan(inst),
+                    meta.jarOf(), Tombstones.load(tmp.resolve("state")), 40);
+            assertTrue(plan.actions().isEmpty(), "环境故障不能产生摘除动作：" + plan.actions());
+            assertTrue(plan.blocked().stream().anyMatch(s -> s.contains("环境或资源故障")),
+                    "应给出环境修复阻断原因：" + plan.blocked());
+        }
+    }
+
     private static void writeJar(Path jar, Map<String, String> entries) throws Exception {
         try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(jar))) {
             for (Map.Entry<String, String> e : entries.entrySet()) {

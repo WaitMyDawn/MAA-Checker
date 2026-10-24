@@ -25,7 +25,7 @@ public record Diagnosis(List<Issue> issues, List<String> evidenceLines, Path cra
         MISSING_REQUIRED,
         /** 加载器版本太低（动作 A：升级 loader） */
         LOADER_TOO_OLD,
-        /** 其它模组版本区间不满足：静态阶段不下结论，交人工（动作 C 或忽略） */
+        /** 其它模组版本区间不满足：按兼容版本策略更新目标模组（动作 D） */
         MOD_VERSION_MISMATCH,
         /** 模组自身加载失败（构造期抛异常） */
         MOD_LOAD_FAILURE,
@@ -35,6 +35,8 @@ public record Diagnosis(List<Issue> issues, List<String> evidenceLines, Path cra
         DUPLICATE_MOD,
         /** 以上之外的崩溃（空指针、原生库、内存等） */
         CRASH_OTHER,
+        /** Java、原生库、图形或资源环境故障；应修复环境，不能据此摘除模组 */
+        ENVIRONMENT,
         /**
          * 模组声明的版本号过不了加载器的格式审查（如 {@code Empty pre-release}）。
          *
@@ -68,7 +70,8 @@ public record Diagnosis(List<Issue> issues, List<String> evidenceLines, Path cra
             return switch (kind) {
                 case MISSING_REQUIRED -> "动作B 补装前置 " + modId + "（" + requestedBy + " 需要它）";
                 case LOADER_TOO_OLD -> "动作A 升级 " + modId + " 到 " + expectedRange;
-                case MOD_VERSION_MISMATCH -> "动作C 摘除 " + requestedBy + "（或人工换版本）";
+                case MOD_VERSION_MISMATCH -> "动作D 更新 " + modId + " 到同时满足全部要求的版本";
+                case ENVIRONMENT -> "检查 Java、原生库、显卡驱动或资源文件；不要据此摘除模组";
                 case BAD_VERSION_FORMAT -> "动作C 摘除 " + modId + "（它声明的版本号 " + actualVersion
                         + " 过不了加载器的格式审查）";
                 case CAUSED_BY_ATTRIBUTED, STACK_ATTRIBUTED ->
@@ -90,6 +93,7 @@ public record Diagnosis(List<Issue> issues, List<String> evidenceLines, Path cra
                         + "，当前 " + actualVersion + jar;
                 case MOD_VERSION_MISMATCH -> "版本区间不满足: " + culprit + " 需要 " + expectedRange
                         + "，当前 " + actualVersion + jar;
+                case ENVIRONMENT -> "环境或资源故障: " + detail;
                 case BAD_VERSION_FORMAT -> "版本号格式非法: " + culprit + " 声明 " + actualVersion + jar;
                 case CAUSED_BY_ATTRIBUTED -> "崩溃链归因: " + culprit + "（Caused by 链里的 from mod）" + jar;
                 case STACK_ATTRIBUTED -> "堆栈归因: " + culprit + jar;

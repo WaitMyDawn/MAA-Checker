@@ -7,6 +7,9 @@ import yagen.waitmydawn.checker.core.ProxyConfig;
 import yagen.waitmydawn.checker.core.RunJournal;
 import yagen.waitmydawn.checker.net.Http;
 import yagen.waitmydawn.checker.net.NetworkAskers;
+import yagen.waitmydawn.checker.task.CheckerTasks;
+import yagen.waitmydawn.checker.task.TaskService;
+import yagen.waitmydawn.checker.task.TaskEvent;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -59,6 +62,9 @@ import java.util.concurrent.Executors;
  *
  * <p>长任务（启动游戏、下载模组）全部跑在后台线程，UI 更新一律回 EDT——
  * 界面不许卡，这是硬要求。
+ *
+ * <p>该 Swing 入口在新版 JavaFX 完成后只承担兼容职责；修复和还原按钮会在执行前明确提示
+ * 其使用旧台账。所有写操作仍通过 {@code CheckerEngine} 获取实例租约，不能绕过新版互斥边界。
  */
 public final class CheckerGui {
 
@@ -87,12 +93,16 @@ public final class CheckerGui {
     private final JTextArea ledgerView = new JTextArea();
     private final List<Path> ledgerFiles = new ArrayList<>();
     private final JButton checkButton = new JButton("开始检验");
-    private final JButton fixButton = new JButton("自动修复");
-    private final JButton restoreButton = new JButton("还原到检验前");
+    private final JButton fixButton = new JButton("旧版兼容修复");
+    private final JButton restoreButton = new JButton("旧版兼容还原");
     private final JButton testNetButton = new JButton("检测网络");
     private final JButton setProxyButton = new JButton("设置代理…");
     private final JButton openDirButton = new JButton("打开产物目录");
     private volatile boolean busy;
+    private final TaskService checkTasks = new TaskService();
+    private volatile TaskService.Handle<Integer> activeCheck;
+    private boolean closeWhenIdle;
+    private final JButton stopCheckButton = new JButton("停止检验");
 
     private CheckerGui(Path toolRoot, Path gameDir, ProxyConfig.Setting proxy) {
         this.toolRoot = toolRoot;
@@ -115,7 +125,26 @@ public final class CheckerGui {
         } catch (Exception ignored) {
             // 用默认观感也能干活
         }
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+        frame.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowClosing(java.awt.event.WindowEvent event) {
+                TaskService.Handle<Integer> task = activeCheck;
+                if (!busy) {
+                    checkTasks.shutdown();
+                    frame.dispose();
+                } else if (task != null) {
+                    int choice = JOptionPane.showConfirmDialog(frame, "停止检验并等待游戏进程释放后退出？", "任务正在运行", JOptionPane.YES_NO_OPTION);
+                    if (choice == JOptionPane.YES_OPTION) {
+                        closeWhenIdle = true;
+                        task.cancel();
+                        stopCheckButton.setEnabled(false);
+                        setStatus("正在停止检验，等待资源清理…");
+                    }
+                } else {
+                    JOptionPane.showMessageDialog(frame, "当前操作仍在执行。旧版修复和还原尚未接入安全停止，请等待结束后关闭。", "请等待操作结束", JOptionPane.INFORMATION_MESSAGE);
+                }
+            }
+        });
         frame.setLayout(new BorderLayout(8, 8));
         frame.add(buildConfigPanel(), BorderLayout.NORTH);
         frame.add(buildCenterPanel(), BorderLayout.CENTER);
@@ -330,6 +359,15 @@ public final class CheckerGui {
         openDirButton.addActionListener(e -> openDir(toolRoot));
         buttons.add(checkButton);
         buttons.add(fixButton);
+        stopCheckButton.setEnabled(false);
+        stopCheckButton.addActionListener(e -> {
+            TaskService.Handle<Integer> task = activeCheck;
+            if (task != null && task.cancel()) {
+                stopCheckButton.setEnabled(false);
+                setStatus("正在停止检验，等待资源清理…");
+            }
+        });
+        buttons.add(stopCheckButton);
         buttons.add(Box.createHorizontalStrut(12));
         buttons.add(restoreButton);
         buttons.add(openDirButton);
@@ -428,6 +466,12 @@ public final class CheckerGui {
         }
         if (busy) return;
         if (fix) {
+            int legacy = JOptionPane.showConfirmDialog(frame,
+                    "这是旧版兼容入口，使用旧台账与旧 A/B/C 修复语义。\n"
+                            + "新版事务工作流、分类策略和轮次记录请使用 JavaFX 桌面版。\n"
+                            + "继续旧版兼容修复吗？",
+                    "旧版兼容入口", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (legacy != JOptionPane.YES_OPTION) return;
             // 记住这次选的轮次上限，下次打开界面直接沿用
             yagen.waitmydawn.checker.core.AppConfig.set(toolRoot,
                     yagen.waitmydawn.checker.core.AppConfig.KEY_FIX_ROUNDS,
@@ -444,28 +488,43 @@ public final class CheckerGui {
         setButtonsEnabled(false);
         progress.setIndeterminate(true);
         progress.setString("运行中…");
-        setStatus(fix ? "自动修复中…" : "检验中…");
+        setStatus(fix ? "旧版兼容修复中…" : "检验中…");
         CheckerEngine.Options o = options();
         // 修复/检验都很长（启动游戏 40~90 秒/轮），必须放后台线程，且不能阻塞 EDT
         Thread worker = Thread.ofVirtual().unstarted(() -> {
+            String outcome = "执行失败";
             try {
                 if (fix) {
-                    CheckerEngine.fix(inst, toolRoot, o, this::log);
+                    int code = CheckerEngine.fix(inst, toolRoot, o, this::log);
+                    outcome = code == 0 ? "修复验证通过" : code == 1 ? "修复未通过，详见日志与台账" : "修复需要人工处理";
                 } else {
-                    CheckerEngine.check(inst, toolRoot, o, this::log);
+                    var task = checkTasks.submit(inst.dir().toAbsolutePath().normalize().toString(), CheckerTasks.check(inst, toolRoot, o), event -> {
+                        if (event.kind() == TaskEvent.Kind.LOG) log(event.text());
+                    });
+                    activeCheck = task;
+                    SwingUtilities.invokeLater(() -> stopCheckButton.setEnabled(!task.snapshot().state().terminal()));
+                    outcome = task.completion().toCompletableFuture().get().message();
                 }
             } catch (Exception ex) {
                 log("执行出错: " + ex);
+                outcome = "执行失败：" + ex.getMessage();
             } finally {
+                activeCheck = null;
+                String finalOutcome = outcome;
                 SwingUtilities.invokeLater(() -> {
                     busy = false;
                     setButtonsEnabled(true);
                     progress.setIndeterminate(false);
                     progress.setValue(0);
                     progress.setString("");
-                    setStatus("完成（详见日志与台账）");
+                    stopCheckButton.setEnabled(false);
+                    setStatus(finalOutcome);
                     reloadLedgers();
                     refreshInstanceInfo();
+                    if (closeWhenIdle) {
+                        checkTasks.shutdown();
+                        frame.dispose();
+                    }
                 });
             }
         });
@@ -477,8 +536,9 @@ public final class CheckerGui {
         if (inst == null) return;
         int ok = JOptionPane.showConfirmDialog(frame,
                 "把该实例的改动还原到检验前？\n"
-                        + "（按台账逐条反做：补装的删掉、摘除的移回、升过的加载器还原）",
-                "确认还原", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                        + "这是旧版兼容入口，只处理旧台账；新版工作流请在 JavaFX 桌面版按轮次还原。\n"
+                        + "（补装的删掉、摘除的移回、升级过的加载器还原）",
+                "确认旧版兼容还原", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (ok != JOptionPane.YES_OPTION || busy) return;
         busy = true;
         setButtonsEnabled(false);

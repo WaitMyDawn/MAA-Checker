@@ -1,168 +1,258 @@
 ﻿<#
-  MAA-Checker 打包脚本（Windows）
+  MAA-Checker Windows 打包脚本。
 
-  默认产出两份，都在 dist\ 下：
-    MAA-Checker-<版本>-win-x64.zip    exe 版：单个 MAA-Checker.exe（jar 嵌在 exe 里，2.5MB）
-                                      不含 JRE，运行时自动找系统的 Java 21+，找不到会弹提示
-    MAA-Checker-<版本>-lite.zip       lite 版：maa-checker.jar + launch.bat（2.2MB，同样不含 JRE）
+  默认产物：
+    MAA-Checker-<版本>-desktop-win-x64.zip
+        jpackage app-image，包含 JavaFX、应用运行时、资源、图标和许可证。
+    MAA-Checker-<版本>-light-win-x64.exe
+        Launch4j 单文件启动器，不包含 JRE，使用本机 Java 21+。
 
-  可选参数：
-    -OnlyExe        只打 exe 版
-    -OnlyLite       只打 lite 版
-    -WithJre        额外再打一份自带运行时的版本（jpackage app-image，约 54MB / zip 39MB）
-    -NoTrim         -WithJre 时用完整运行时（不裁剪，体积更大，排查用）
-    -Version x.y.z  版本号（默认 0.1.0）
-                    —— 它同时决定：zip 名、jpackage 的版本、以及 exe 右键属性里的版本
-                    （通过 mvn -Drevision=... 传给 pom，见 pom 里的 <revision>）
-    -Mvn <命令>     用什么跑 maven（默认用本地开发机的 ..\Minecraft-AI-Agent\mvnw.cmd；
-                    CI 上那个目录不存在，所以 CI 传 -Mvn mvn）
-    -NoOffline      跳过"先离线再联网"的第一轮（CI 首次没有本地仓库，离线必然失败白等一轮）
-
-  典型用法：
-    本地： powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.1.0 -WithJre
-    CI ： powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.2.0 -WithJre -Mvn mvn -NoOffline
-
-  为什么要"默认不带 JRE"：玩整合包的机器上必然有 Java（启动器会提醒），
-  exe 版的 Launch4j 包装器会自己按 PATH/JAVA_HOME/注册表找 Java 21+，
-  找不到时弹的提示里带 Java 下载指引。要"零依赖"就给 -WithJre。
+  桌面版用户数据固定放在 %LOCALAPPDATA%\MAA-Checker，不在安装目录：
+  升级、卸载或删除便携目录不得清除实例恢复资料。
 #>
 param(
-    [string]$Version = '0.1.0',
-    [switch]$OnlyExe,
-    [switch]$OnlyLite,
-    [switch]$WithJre,
-    [switch]$NoTrim,
-    [string]$Mvn = '',
+    [string]$Version = '1.0.0',
+    [string]$Mvn = 'mvn',
     [switch]$NoOffline
 )
 
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = [IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
+$distRoot = [IO.Path]::GetFullPath((Join-Path $root 'dist'))
+$buildRoot = [IO.Path]::GetFullPath((Join-Path $root 'build\packaging'))
 Set-Location $root
-$distRoot = Join-Path $root 'dist'
 
-function New-CleanDir([string]$path) {
-    if (Test-Path $path) {
-        try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop }
-        catch {
-            # 目录被占用（上一次的界面还开着、资源管理器停在里面）时不硬失败，换时间戳名字
-            $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-            $alt = "$path-$stamp"
-            Write-Host "  原目录被占用，改为 $alt" -ForegroundColor Yellow
-            New-Item -ItemType Directory -Path $alt -Force | Out-Null
-            return $alt
-        }
+function Assert-ChildPath([string]$path, [string]$parent) {
+    $full = [IO.Path]::GetFullPath($path)
+    $base = [IO.Path]::GetFullPath($parent).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "拒绝操作预期根目录之外的路径：$full（根：$parent）"
     }
-    New-Item -ItemType Directory -Path $path -Force | Out-Null
-    return $path
+    return $full
 }
 
-function New-Zip([string]$srcDir, [string]$zipPath) {
-    if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-    Compress-Archive -Path (Join-Path $srcDir '*') -DestinationPath $zipPath -CompressionLevel Optimal
+function Remove-SafeTree([string]$path, [string]$parent) {
+    $full = Assert-ChildPath $path $parent
+    if (-not (Test-Path -LiteralPath $full)) { return }
+    $item = Get-Item -LiteralPath $full -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "拒绝递归清理重解析点：$full"
+    }
+    Remove-Item -LiteralPath $full -Recurse -Force
 }
 
-Write-Host '=== 1/4 编译（含生成 exe）===' -ForegroundColor Cyan
-# maven 用哪个：默认本地开发机的兄弟目录 wrapper；CI 传 -Mvn mvn
-$mvnCmd = if ($Mvn) { $Mvn } else { Join-Path (Split-Path $root -Parent) 'Minecraft-AI-Agent\mvnw.cmd' }
-# 版本号透给 pom 的 <revision>：zip 名、jpackage 版本、exe 属性三者一致
-$verArg = "-Drevision=$Version"
-if ($NoOffline) {
-    Write-Host "  构建（联网）: $mvnCmd $verArg package"
-    & $mvnCmd -q -DskipTests $verArg package
-    if ($LASTEXITCODE -ne 0) { throw "maven 打包失败（退出码 $LASTEXITCODE）" }
-} else {
-    # 优先离线（依赖与 launch4j 插件通常已在本地仓库）；缺东西时自动联网再试一次
-    & $mvnCmd -o -q -DskipTests $verArg package
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host '  离线构建失败，改为联网构建（首次需要下载 launch4j 插件）…' -ForegroundColor Yellow
-        & $mvnCmd -q -DskipTests $verArg package
-        if ($LASTEXITCODE -ne 0) { throw "maven 打包失败（退出码 $LASTEXITCODE）" }
+function New-SafeDir([string]$path, [string]$parent) {
+    $full = Assert-ChildPath $path $parent
+    Remove-SafeTree $full $parent
+    New-Item -ItemType Directory -Path $full -Force | Out-Null
+    return $full
+}
+
+function New-SafeZip([string]$source, [string]$zip, [string]$parent) {
+    $target = Assert-ChildPath $zip $parent
+    if (Test-Path -LiteralPath $target) {
+        $item = Get-Item -LiteralPath $target -Force
+        if ($item.PSIsContainer) { throw "ZIP 目标不是文件：$target" }
+        Remove-Item -LiteralPath $target -Force
+    }
+    Compress-Archive -Path (Join-Path $source '*') -DestinationPath $target -CompressionLevel Optimal
+}
+
+function Invoke-MavenPackage([string]$profile) {
+    $common = @('-B', '-ntp', '-DskipTests', "-Drevision=$Version", "-P$profile", 'package')
+    if (-not $NoOffline) {
+        Write-Host "  离线构建 $profile ..."
+        & $Mvn @(@('-o') + $common)
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Host "  离线构建失败，改为联网构建 $profile ..." -ForegroundColor Yellow
+    }
+    & $Mvn @common
+    if ($LASTEXITCODE -ne 0) { throw "Maven $profile 构建失败（退出码 $LASTEXITCODE）" }
+}
+
+function Invoke-Launch4j([string]$icon) {
+    $arguments = @('-B', '-ntp', '-DskipTests', "-Drevision=$Version",
+        '-Pdesktop-light', "-Dmaa.icon=$icon",
+        'com.akathist.maven.plugins.launch4j:launch4j-maven-plugin:2.5.0:launch4j')
+    if (-not $NoOffline) {
+        Write-Host '  离线构建轻量 EXE ...'
+        & $Mvn @(@('-o') + $arguments)
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Host '  离线构建失败，改为联网构建轻量 EXE ...' -ForegroundColor Yellow
+    }
+    & $Mvn @arguments
+    if ($LASTEXITCODE -ne 0) { throw "Launch4j 构建失败（退出码 $LASTEXITCODE）" }
+}
+
+function Resolve-JdkTool([string]$name) {
+    if ($env:JAVA_HOME) {
+        $candidate = Join-Path $env:JAVA_HOME "bin\$name"
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    $command = Get-Command $name -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    throw "找不到 $name；jpackage 桌面版需要 JDK 21。"
+}
+
+function New-AppIcon([string]$target) {
+    Add-Type -AssemblyName System.Drawing
+    $bitmap = New-Object System.Drawing.Bitmap 256, 256
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $graphics.Clear([System.Drawing.Color]::Transparent)
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $radius = 44
+    $diameter = $radius * 2
+    $path.AddArc(8, 8, $diameter, $diameter, 180, 90)
+    $path.AddArc(248 - $diameter, 8, $diameter, $diameter, 270, 90)
+    $path.AddArc(248 - $diameter, 248 - $diameter, $diameter, $diameter, 0, 90)
+    $path.AddArc(8, 248 - $diameter, $diameter, $diameter, 90, 90)
+    $path.CloseFigure()
+    $background = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 0, 134, 109))
+    $graphics.FillPath($background, $path)
+    $checkPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::White), 25
+    $checkPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $checkPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $graphics.DrawLines($checkPen, [System.Drawing.Point[]]@(
+        [System.Drawing.Point]::new(66, 132),
+        [System.Drawing.Point]::new(112, 178),
+        [System.Drawing.Point]::new(194, 82)
+    ))
+    $png = New-Object IO.MemoryStream
+    $bitmap.Save($png, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bytes = $png.ToArray()
+    $stream = [IO.File]::Open($target, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+    $writer = New-Object IO.BinaryWriter($stream)
+    try {
+        $writer.Write([UInt16]0)
+        $writer.Write([UInt16]1)
+        $writer.Write([UInt16]1)
+        $writer.Write([Byte]0)
+        $writer.Write([Byte]0)
+        $writer.Write([Byte]0)
+        $writer.Write([Byte]0)
+        $writer.Write([UInt16]1)
+        $writer.Write([UInt16]32)
+        $writer.Write([UInt32]$bytes.Length)
+        $writer.Write([UInt32]22)
+        $writer.Write($bytes)
+    } finally {
+        $writer.Dispose()
+        $png.Dispose()
+        $checkPen.Dispose()
+        $background.Dispose()
+        $path.Dispose()
+        $graphics.Dispose()
+        $bitmap.Dispose()
     }
 }
-$jar = Join-Path $root 'target\maa-checker.jar'
-$exe = Join-Path $root 'target\MAA-Checker.exe'
-if (-not (Test-Path $jar)) { throw "没有找到 $jar" }
 
-$base = "MAA-Checker-$Version"
+function Assert-JarContains([string]$jar, [string]$pattern, [string]$message) {
+    $entries = & (Resolve-JdkTool 'jar.exe') tf $jar
+    if ($LASTEXITCODE -ne 0) { throw "无法读取 jar：$jar" }
+    if (-not ($entries | Where-Object { $_ -like $pattern })) { throw $message }
+}
+
+if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+    throw "版本号必须是 x.y.z：$Version"
+}
+
+New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
+$stage = New-SafeDir (Join-Path $buildRoot "stage-$PID") $buildRoot
 $made = @()
+$base = "MAA-Checker-$Version"
+$icon = Join-Path $stage 'maa-checker.ico'
 
-if (-not $OnlyLite) {
-    Write-Host '=== 2/4 组装 exe 版 ===' -ForegroundColor Cyan
-    if (-not (Test-Path $exe)) { throw "没有找到 $exe（launch4j 没有产出，检查 pom.xml 里的 launch4j 配置）" }
-    $dir = Join-Path $distRoot "$base-win-x64"
-    $dir = New-CleanDir $dir
-    Copy-Item $exe (Join-Path $dir 'MAA-Checker.exe')
-    Copy-Item (Join-Path $root 'packaging\README.txt') $dir
-    $zip = Join-Path $distRoot "$base-win-x64.zip"
-    New-Zip $dir $zip
-    $made += $zip
-    Write-Host ("  exe: {0}（{1:N2} MB）" -f $zip, ((Get-Item $zip).Length / 1MB)) -ForegroundColor Green
-}
+try {
+    New-AppIcon $icon
+    Write-Host '=== JavaFX 桌面构建 ===' -ForegroundColor Cyan
+    Invoke-MavenPackage 'desktop'
+        $desktopJar = Join-Path $root 'target\desktop\maa-checker-desktop.jar'
+        if (-not (Test-Path -LiteralPath $desktopJar)) { throw "缺少桌面 jar：$desktopJar" }
+        Assert-JarContains $desktopJar 'javafx/application/Application.class' '桌面 jar 未包含 JavaFX 类'
+        Assert-JarContains $desktopJar '*.dll' '桌面 jar 未包含 JavaFX 本地库'
+        Assert-JarContains $desktopJar 'yagen/waitmydawn/checker/desktop/DesktopLauncher.class' '桌面 jar 入口缺失'
+        Assert-JarContains $desktopJar 'yagen/waitmydawn/checker/desktop/app-icon-256.png' '桌面 jar 未包含窗口图标'
 
-if (-not $OnlyExe) {
-    Write-Host '=== 3/4 组装 lite 版 ===' -ForegroundColor Cyan
-    $dir = Join-Path $distRoot "$base-lite"
-    $dir = New-CleanDir $dir
-    New-Item -ItemType Directory -Path (Join-Path $dir 'tools') -Force | Out-Null
-    Copy-Item $jar (Join-Path $dir 'maa-checker.jar')
-    Copy-Item (Join-Path $root 'packaging\launch.bat') $dir
-    Copy-Item (Join-Path $root 'packaging\README.txt') $dir
-    Copy-Item (Join-Path $root 'packaging\find-java.ps1') (Join-Path $dir 'tools')
-    $configText = @'
-# MAA-Checker 配置（界面或命令行会自动维护这个文件）
-# proxy.url=http://127.0.0.1:7890   固定代理；留空/删掉则自动探测系统代理（Clash 打开"系统代理"即可）
-# game.dir=D:\Minecraft\minecraft\.minecraft   上次使用的游戏目录（界面会自动写入）
-'@
-    # 必须不带 BOM（Java 读第一行时会把 BOM 当成 key 的一部分）
-    [IO.File]::WriteAllText((Join-Path $dir 'config.properties'), $configText,
-        (New-Object Text.UTF8Encoding($false)))
-    $zip = Join-Path $distRoot "$base-lite.zip"
-    New-Zip $dir $zip
-    $made += $zip
-    Write-Host ("  lite: {0}（{1:N2} MB）" -f $zip, ((Get-Item $zip).Length / 1MB)) -ForegroundColor Green
-}
-
-if ($WithJre) {
-    Write-Host '=== 4/4 组装自带运行时版本（jlink + jpackage）===' -ForegroundColor Cyan
-    $jdkBin = Split-Path -Parent (Get-Command java -ErrorAction SilentlyContinue).Source
-    if (-not $jdkBin) { $jdkBin = Split-Path -Parent (Get-Command javac).Source }
-    $jlink = Join-Path $jdkBin 'jlink.exe'
-    $jpackage = Join-Path $jdkBin 'jpackage.exe'
-    if (-not (Test-Path $jlink) -or -not (Test-Path $jpackage)) {
-        Write-Host '  找不到 jlink/jpackage（需要 JDK 21 的 bin 在 PATH），跳过。' -ForegroundColor Yellow
-    } else {
-        $work = Join-Path $env:TEMP ("maa-checker-jre-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
-        New-Item -ItemType Directory -Path $work -Force | Out-Null
-        $runtime = Join-Path $work 'runtime'
-        if ($NoTrim) {
-            Write-Host '  使用完整运行时（未裁剪）…'
-            & $jlink --add-modules ALL-MODULE-PATH --strip-debug --no-header-files --no-man-pages `
-                --output $runtime | Out-Null
-        } else {
-            Write-Host '  裁剪运行时（只保留界面 + HTTP + TLS 需要的模块）…'
-            & $jlink --add-modules java.base,java.desktop,java.logging,java.net.http,jdk.crypto.ec `
-                --strip-debug --no-header-files --no-man-pages --compress=zip-9 --output $runtime | Out-Null
+        $payload = Join-Path $stage 'desktop-payload'
+        New-Item -ItemType Directory -Path $payload | Out-Null
+        Copy-Item $desktopJar (Join-Path $payload 'maa-checker-desktop.jar')
+        $appOut = Join-Path $stage 'desktop-app'
+        New-Item -ItemType Directory -Path $appOut | Out-Null
+        $jpackage = Resolve-JdkTool 'jpackage.exe'
+        $appArgs = @(
+            '--type', 'app-image',
+            '--name', 'MAA-Checker',
+            '--dest', $appOut,
+            '--input', $payload,
+            '--main-jar', 'maa-checker-desktop.jar',
+            '--main-class', 'yagen.waitmydawn.checker.desktop.DesktopLauncher',
+            '--app-version', $Version,
+            '--vendor', 'Yagen',
+            '--description', 'Minecraft modpack feasibility checker',
+            '--icon', $icon,
+            '--add-modules', 'java.base,java.desktop,java.logging,java.management,jdk.management,java.net.http,jdk.crypto.ec,jdk.unsupported',
+            '--java-options', '-Dfile.encoding=UTF-8',
+            '--java-options', '-Dstdout.encoding=UTF-8',
+            '--java-options', '-Dstderr.encoding=UTF-8'
+        )
+        & $jpackage @appArgs
+        if ($LASTEXITCODE -ne 0) { throw "jpackage 桌面应用镜像失败（退出码 $LASTEXITCODE）" }
+        $appSource = Join-Path $appOut 'MAA-Checker'
+        $runtimeJvm = Get-ChildItem -LiteralPath (Join-Path $appSource 'runtime') `
+            -Recurse -Filter 'jvm.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $runtimeJvm -or -not (Test-Path (Join-Path $appSource 'app\MAA-Checker.cfg'))) {
+            throw "jpackage 产物缺少应用运行时"
         }
-        $appDir = Join-Path $work 'app'
-        & $jpackage --type app-image --name 'MAA-Checker' --input (Join-Path $root 'target') `
-            --main-jar 'maa-checker.jar' --main-class 'yagen.waitmydawn.checker.CheckerCli' `
-            --runtime-image $runtime --app-version $Version --dest $appDir `
-            --java-options '-Dstdout.encoding=UTF-8' | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host '  jpackage 失败，跳过自带运行时版本。' -ForegroundColor Yellow
-        } else {
-            $dir = Join-Path $distRoot "$base-win-x64-jre"
-            $dir = New-CleanDir $dir
-            Copy-Item (Join-Path $appDir 'MAA-Checker\*') $dir -Recurse
-            Copy-Item (Join-Path $root 'packaging\README.txt') $dir
-            $zip = Join-Path $distRoot "$base-win-x64-jre.zip"
-            New-Zip $dir $zip
-            $made += $zip
-            Write-Host ("  自带运行时: {0}（{1:N1} MB）" -f $zip, ((Get-Item $zip).Length / 1MB)) -ForegroundColor Green
+        Copy-Item 'packaging\README-DESKTOP.txt','packaging\DATA-AND-REMOVAL.txt','LICENSE',
+            'src\desktop\resources\THIRD-PARTY-NOTICES.txt' $appSource
+
+        $smokeOut = Join-Path $stage 'package-smoke.out.log'
+        $smokeErr = Join-Path $stage 'package-smoke.err.log'
+        $smoke = Start-Process -FilePath (Join-Path $appSource 'MAA-Checker.exe') `
+            -ArgumentList '--package-smoke' -Wait -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $smokeOut -RedirectStandardError $smokeErr
+        if ($smoke.ExitCode -ne 0) {
+            $detail = @()
+            if (Test-Path $smokeOut) { $detail += Get-Content $smokeOut -Tail 20 }
+            if (Test-Path $smokeErr) { $detail += Get-Content $smokeErr -Tail 20 }
+            throw "打包后 JavaFX 启动冒烟失败（退出码 $($smoke.ExitCode)）：$($detail -join ' | ')"
         }
-    }
+
+        $desktopDir = Join-Path $stage 'desktop-portable'
+        New-Item -ItemType Directory -Path $desktopDir | Out-Null
+        Copy-Item (Join-Path $appSource '*') $desktopDir -Recurse
+        $desktopZip = Join-Path $distRoot "$base-desktop-win-x64.zip"
+        New-SafeZip $desktopDir $desktopZip $distRoot
+        $made += $desktopZip
+
+        Write-Host '=== 轻量 EXE 构建 ===' -ForegroundColor Cyan
+        Invoke-Launch4j $icon
+        $lightSource = Join-Path $root 'target\desktop\MAA-Checker-Light.exe'
+        if (-not (Test-Path -LiteralPath $lightSource)) {
+            throw "缺少轻量 EXE：$lightSource"
+        }
+        $lightSmoke = Start-Process -FilePath $lightSource `
+            -ArgumentList '--package-smoke' -Wait -PassThru -WindowStyle Hidden
+        if ($lightSmoke.ExitCode -ne 0) {
+            throw "轻量 EXE 启动冒烟失败（退出码 $($lightSmoke.ExitCode)）"
+        }
+        $lightExe = Join-Path $distRoot "$base-light-win-x64.exe"
+        Copy-Item -LiteralPath $lightSource -Destination $lightExe -Force
+        $made += $lightExe
+
+} finally {
+    Remove-SafeTree $stage $buildRoot
 }
 
 Write-Host '=== 完成 ===' -ForegroundColor Cyan
-$made | ForEach-Object { Write-Host ("  {0}  ({1:N2} MB)" -f $_, ((Get-Item $_).Length / 1MB)) }
+$sumFile = Join-Path $distRoot 'SHA256SUMS.txt'
+$sums = $made | Where-Object { $_ -match '\.(zip|exe)$' } | ForEach-Object {
+    "$((Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLower())  $(Split-Path -Leaf $_)"
+}
+[IO.File]::WriteAllLines($sumFile, $sums, (New-Object Text.UTF8Encoding($false)))
+$made += $sumFile
+$made | ForEach-Object {
+    Write-Host ("  {0}  ({1:N2} MB)" -f $_, ((Get-Item -LiteralPath $_).Length / 1MB))
+}

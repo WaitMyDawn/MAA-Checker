@@ -34,7 +34,10 @@ import java.util.zip.ZipFile;
 public final class JarModReader {
 
     /** @param source 从哪读到的（toml / fabric / quilt），写进台账便于解释归因来源 */
-    public record Mod(String modId, String version, String source) {
+    public record Mod(String modId, String version, String source, String displayName) {
+        public Mod(String modId, String version, String source) {
+            this(modId, version, source, modId);
+        }
     }
 
     private static final Pattern JSON_STR = Pattern.compile("\"%s\"\\s*:\\s*\"([^\"]*)\"");
@@ -59,13 +62,14 @@ public final class JarModReader {
         if (toml == null) toml = readEntry(zf, "META-INF/mods.toml");
         if (toml != null) {
             for (ModToml.ModDecl m : ModToml.mods(toml)) {
-                out.putIfAbsent(m.modId(), new Mod(m.modId(), m.version(), "toml"));
+                out.putIfAbsent(m.modId(), new Mod(m.modId(), m.version(), "toml", m.displayName()));
             }
         }
         String fabric = readEntry(zf, "fabric.mod.json");
         if (fabric != null) {
             String id = jsonValue(fabric, "id");
-            if (id != null) out.putIfAbsent(id, new Mod(id, orQ(jsonValue(fabric, "version")), "fabric"));
+            if (id != null) out.putIfAbsent(id, new Mod(id, orQ(jsonValue(fabric, "version")),
+                    "fabric", orDefault(jsonValue(fabric, "name"), id)));
         }
         String quilt = readEntry(zf, "quilt.mod.json");
         if (quilt != null) {
@@ -73,7 +77,8 @@ public final class JarModReader {
             // 所以必须先截到 quilt_loader 之后再取，否则会读到依赖项的 id
             String loader = afterKey(quilt, "quilt_loader");
             String id = jsonValue(loader, "id");
-            if (id != null) out.putIfAbsent(id, new Mod(id, orQ(jsonValue(loader, "version")), "quilt"));
+            if (id != null) out.putIfAbsent(id, new Mod(id, orQ(jsonValue(loader, "version")),
+                    "quilt", orDefault(jsonValue(loader, "name"), id)));
         }
         return List.copyOf(out.values());
     }
@@ -110,5 +115,17 @@ public final class JarModReader {
         List<String> out = new ArrayList<>();
         for (Mod m : read(jar)) out.add(m.modId());
         return List.copyOf(out);
+    }
+
+    public static String displayNameOf(Path jar, String modId) {
+        if (modId == null) return null;
+        for (Mod mod : read(jar)) {
+            if (mod.modId().equalsIgnoreCase(modId)) return mod.displayName();
+        }
+        return null;
+    }
+
+    private static String orDefault(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
     }
 }

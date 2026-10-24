@@ -59,7 +59,13 @@ public final class ModrinthClient {
      */
     public record Candidate(String slug, String title, String projectId, String versionId,
                             String versionNumber, String fileName, String url, long size,
-                            String projectType) {
+                            String projectType, String datePublished) {
+        public Candidate(String slug, String title, String projectId, String versionId,
+                         String versionNumber, String fileName, String url, long size,
+                         String projectType) {
+            this(slug, title, projectId, versionId, versionNumber, fileName, url, size,
+                    projectType, "");
+        }
 
         /** 镜像的文件入口；项目/版本 ID 缺失时返回 null */
         public String mirrorUrl() {
@@ -79,6 +85,16 @@ public final class ModrinthClient {
 
         public boolean found() {
             return !candidates.isEmpty();
+        }
+    }
+
+    /** 某个已安装模组的全部兼容版本，供最低版本、最新兼容版本和自选版本策略使用。 */
+    public record VersionResolution(List<Candidate> candidates, List<String> rejected,
+                                    List<String> sameName) {
+        public VersionResolution {
+            candidates = List.copyOf(candidates);
+            rejected = List.copyOf(rejected);
+            sameName = List.copyOf(sameName);
         }
     }
 
@@ -102,6 +118,23 @@ public final class ModrinthClient {
                                      String requiredRange, NetworkManager nm, Consumer<String> log)
             throws IOException {
         return resolve(modId, mcVersion, loader, requiredRange,
+                nm == null ? httpGet(log) : channelGet(nm, log), log);
+    }
+
+    public static VersionResolution resolveVersions(String modId, String projectTitle,
+                                                    String mcVersion, String loader,
+                                                    List<String> requiredRanges,
+                                                    Consumer<String> log) throws IOException {
+        return resolveVersions(modId, projectTitle, mcVersion, loader, requiredRanges,
+                httpGet(log), log);
+    }
+
+    public static VersionResolution resolveVersions(String modId, String projectTitle,
+                                                    String mcVersion, String loader,
+                                                    List<String> requiredRanges,
+                                                    NetworkManager nm, Consumer<String> log)
+            throws IOException {
+        return resolveVersions(modId, projectTitle, mcVersion, loader, requiredRanges,
                 nm == null ? httpGet(log) : channelGet(nm, log), log);
     }
 
@@ -215,6 +248,123 @@ public final class ModrinthClient {
         return new Resolution(List.copyOf(candidates), List.copyOf(rejected), List.copyOf(sameName));
     }
 
+    static VersionResolution resolveVersions(String modId, String projectTitle, String mcVersion,
+                                             String loader, List<String> requiredRanges,
+                                             JsonGet get, Consumer<String> log) throws IOException {
+        String want = normalize(modId);
+        Map<String, JsonNode> projects = new LinkedHashMap<>();
+        List<Ref> refs = new ArrayList<>();
+        List<String> rejected = new ArrayList<>();
+        List<String> sameName = new ArrayList<>();
+        List<String> ranges = requiredRanges == null ? List.of() : requiredRanges;
+
+        for (String cand : slugCandidates(modId)) {
+            JsonNode project = project(cand, get, projects, log);
+            if (project == null) continue;
+            String slug = project.path("slug").asText(cand);
+            refs.add(new Ref(slug, normalize(slug).equals(want) ? 0 : 1,
+                    "slug 直查 \"" + cand + "\""));
+        }
+
+        if (projectTitle != null && !projectTitle.isBlank()) {
+            JsonNode titleHits = search(projectTitle, mcVersion, loader, get, log);
+            if (titleHits != null) {
+                for (JsonNode hit : titleHits) {
+                    String slug = hit.path("slug").asText("");
+                    String title = hit.path("title").asText("");
+                    if (!slug.isBlank() && normalize(title).equals(normalize(projectTitle))) {
+                        refs.add(new Ref(slug, 0, "标题精确命中 \"" + projectTitle + "\""));
+                    }
+                }
+            }
+        }
+
+        JsonNode hits = search(modId, mcVersion, loader, get, log);
+        if (hits != null) {
+            for (JsonNode hit : hits) {
+                String slug = hit.path("slug").asText("");
+                if (slug.isBlank()) continue;
+                if (normalize(slug).equals(want)
+                        || normalize(hit.path("title").asText()).equals(want)) {
+                    refs.add(new Ref(slug, 1, "modId 搜索命中"));
+                } else {
+                    sameName.add("slug=" + slug + "（" + hit.path("title").asText() + "）");
+                }
+            }
+        }
+
+        for (Ref ref : ordered(refs)) {
+            JsonNode project = project(ref.slug(), get, projects, log);
+            if (project == null) continue;
+            String slug = project.path("slug").asText(ref.slug());
+            String gate = gate(project, loader);
+            if (gate != null) {
+                rejected.add("项目 \"" + slug + "\" 被排除：" + gate);
+                continue;
+            }
+            List<JsonNode> versions = projectVersions(slug, mcVersion, loader, get, log);
+            List<JsonNode> matching = versions.stream()
+                    .filter(v -> ranges.stream().allMatch(range -> VersionRanges.satisfies(
+                            versionForRange(v.path("version_number").asText(), mcVersion),
+                            rangeForMc(range, mcVersion))))
+                    .sorted(Comparator.comparing(
+                            (JsonNode v) -> v.path("date_published").asText()).reversed())
+                    .toList();
+            if (matching.isEmpty()) {
+                rejected.add("项目 \"" + slug + "\" 没有同时满足 " + ranges + " 的版本");
+                continue;
+            }
+            List<Candidate> candidates = matching.stream()
+                    .map(version -> candidate(project, slug, version))
+                    .toList();
+            if (log != null) {
+                log.accept("   ↳ " + slug + " 有 " + candidates.size() + " 个同时满足全部区间的版本："
+                        + candidates.stream().map(Candidate::versionNumber)
+                        .collect(Collectors.joining(" / ")));
+            }
+            return new VersionResolution(candidates, List.copyOf(rejected), List.copyOf(sameName));
+        }
+
+        if (log != null) {
+            log.accept("   ↳ 没有找到同时满足 " + ranges + " 的版本；不会用不满足约束的最新版碰运气");
+        }
+        return new VersionResolution(List.of(), List.copyOf(rejected), List.copyOf(sameName));
+    }
+
+    private static List<JsonNode> projectVersions(String slug, String mcVersion, String loader,
+                                                  JsonGet get, Consumer<String> log)
+            throws IOException {
+        String versionsUrl = API + "/project/" + Http.enc(slug) + "/version?loaders="
+                + Http.enc("[\"" + loader + "\"]") + "&game_versions="
+                + Http.enc("[\"" + mcVersion + "\"]");
+        String body = get.get(versionsUrl);
+        if (body == null) {
+            if (log != null) log.accept("   ↳ 版本接口没有返回内容（项目 " + slug + "）");
+            return List.of();
+        }
+        JsonNode versions;
+        try {
+            versions = MAPPER.readTree(body);
+        } catch (Exception e) {
+            if (log != null) log.accept("   ↳ 版本接口返回不是 JSON: " + e.getMessage());
+            return List.of();
+        }
+        if (!versions.isArray()) return List.of();
+        List<JsonNode> usable = new ArrayList<>();
+        for (JsonNode version : versions) {
+            if (primaryFile(version) != null) usable.add(version);
+        }
+        return usable;
+    }
+
+    private static Candidate candidate(JsonNode project, String slug, JsonNode version) {
+        JsonNode file = primaryFile(version);
+        return new Candidate(slug, project.path("title").asText(), project.path("id").asText(),
+                version.path("id").asText(), version.path("version_number").asText(),
+                file.path("filename").asText(), file.path("url").asText(),
+                file.path("size").asLong(), "mod", version.path("date_published").asText());
+    }
+
     private static void logConclusion(String modId, String mcVersion, String loader,
                                       List<Candidate> candidates, List<String> rejected,
                                       List<String> sameName, Consumer<String> log) {
@@ -222,7 +372,7 @@ public final class ModrinthClient {
             log.accept("   ↳ 候选 " + candidates.size() + " 个："
                     + candidates.stream().map(c -> c.slug() + " " + c.versionNumber())
                     .collect(Collectors.joining(" / "))
-                    + "（装之前会下载并核对 jar 内真实 modId）");
+                + "（装之前会下载并核对 jar 内声明的 modId）");
             return;
         }
         if (rejected.isEmpty() && sameName.isEmpty()) {
@@ -300,7 +450,9 @@ public final class ModrinthClient {
         }
         // 优先满足依赖声明的区间；都不满足才退到最新版，并把风险写进日志
         List<JsonNode> fitting = usable.stream()
-                .filter(v -> VersionRanges.satisfies(v.path("version_number").asText(), requiredRange))
+                .filter(v -> VersionRanges.satisfies(
+                        versionForRange(v.path("version_number").asText(), mcVersion),
+                        rangeForMc(requiredRange, mcVersion)))
                 .toList();
         boolean exact = !fitting.isEmpty();
         List<JsonNode> pool = exact ? fitting : usable;
@@ -316,7 +468,8 @@ public final class ModrinthClient {
                 project.path("id").asText(),                 // 镜像文件入口要用项目 ID
                 chosen.path("id").asText(),
                 chosen.path("version_number").asText(), file.path("filename").asText(),
-                file.path("url").asText(), file.path("size").asLong(), "mod");
+                file.path("url").asText(), file.path("size").asLong(), "mod",
+                chosen.path("date_published").asText());
     }
 
     /** 按 slug/ID 查项目；404 返回 null（连"查过但没有"也缓存，避免同一个 slug 重复打接口） */
@@ -407,6 +560,28 @@ public final class ModrinthClient {
 
     private static String normalize(String s) {
         return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+    }
+
+    /**
+     * Modrinth 的 version_number 常带 Minecraft 前缀（{@code 1.21.1-1.3.1}），
+     * 而模组依赖区间约束的是 JAR 内声明的模组版本（{@code 1.3.1}）。只在完整前缀完全匹配时剥离。
+     */
+    static String versionForRange(String versionNumber, String mcVersion) {
+        if (versionNumber == null || mcVersion == null || mcVersion.isBlank()) return versionNumber;
+        for (String separator : List.of("-", "+")) {
+            String prefix = mcVersion + separator;
+            if (versionNumber.regionMatches(true, 0, prefix, 0, prefix.length())
+                    && versionNumber.length() > prefix.length()) {
+                return versionNumber.substring(prefix.length());
+            }
+        }
+        return versionNumber;
+    }
+
+    static String rangeForMc(String range, String mcVersion) {
+        if (range == null || mcVersion == null || mcVersion.isBlank()) return range;
+        return range.replaceAll("(?<![0-9A-Za-z])" + java.util.regex.Pattern.quote(mcVersion)
+                + "-(?=[0-9])", "");
     }
 
     private static String quote(String s) {

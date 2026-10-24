@@ -2,6 +2,7 @@ package yagen.waitmydawn.checker.action;
 
 import yagen.waitmydawn.checker.core.Diagnosis;
 import yagen.waitmydawn.checker.core.StaticDepsScanner;
+import yagen.waitmydawn.checker.core.VersionUpdateStrategy;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -9,6 +10,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -37,10 +39,17 @@ public final class ActionPlanner {
 
     public static ActionPlan plan(String loader, Diagnosis diag, StaticDepsScanner.Report stat,
                                   Map<String, String> jarIndex, Tombstones tombs, int cascadeLimit) {
+        return plan(loader, diag, stat, jarIndex, tombs, cascadeLimit, null);
+    }
+
+    public static ActionPlan plan(String loader, Diagnosis diag, StaticDepsScanner.Report stat,
+                                  Map<String, String> jarIndex, Tombstones tombs, int cascadeLimit,
+                                  VersionUpdateStrategy versionStrategy) {
         List<PlannedAction> actions = new ArrayList<>();
         List<String> blocked = new ArrayList<>();
         List<String> notes = new ArrayList<>();
         Set<String> seen = new HashSet<>();
+        Map<String, List<Diagnosis.Issue>> versionMismatches = new java.util.LinkedHashMap<>();
         // 低置信渠道（堆栈/类名反查）每轮最多采纳一个：一次误判摘掉一堆的代价太大
         boolean lowConfidenceUsed = false;
 
@@ -74,6 +83,8 @@ public final class ActionPlanner {
         for (Diagnosis.Issue i : diag.issues()) {
             switch (i.kind()) {
                 case LOADER_TOO_OLD -> { /* 已在 A 里合并处理 */ }
+                case ENVIRONMENT -> blocked.add("检测到环境或资源故障，应先处理 Java、原生库、显卡驱动"
+                        + "或资源文件，不能据此摘除模组：" + i.detail());
                 case MISSING_REQUIRED -> {
                     if (tombs.contains(i.modId())) {
                         // 前置被墓碑禁止补装 → 按规则只能摘掉依赖方（并级联它自己的依赖者）
@@ -120,8 +131,38 @@ public final class ActionPlanner {
                         if (i.kind() == Diagnosis.Kind.STACK_ATTRIBUTED) lowConfidenceUsed = true;
                     }
                 }
-                case MOD_VERSION_MISMATCH -> notes.add("模组版本区间不满足（静态判定可能与真实加载器语义不同），"
-                        + "本轮不自动动作：" + i.describe());
+                case MOD_VERSION_MISMATCH -> {
+                    if (versionStrategy == null || i.modId() == null) {
+                        notes.add("模组版本区间不满足（未配置版本更新策略）：" + i.describe());
+                    } else {
+                        versionMismatches.computeIfAbsent(i.modId(), ignored -> new ArrayList<>()).add(i);
+                    }
+                }
+            }
+        }
+
+        for (Map.Entry<String, List<Diagnosis.Issue>> entry : versionMismatches.entrySet()) {
+            String target = entry.getKey();
+            List<Diagnosis.Issue> issues = entry.getValue();
+            String jar = issues.stream().map(Diagnosis.Issue::jarFile)
+                    .filter(Objects::nonNull).findFirst().orElse(jarIndex.get(target));
+            if (jar == null) {
+                blocked.add("版本区间不满足的模组 " + target
+                        + " 在 mods 目录里找不到顶层 jar（可能嵌套在其它 jar 中），无法安全替换");
+                continue;
+            }
+            List<String> ranges = issues.stream().map(Diagnosis.Issue::expectedRange)
+                    .filter(Objects::nonNull).distinct().toList();
+            String constraints = issues.stream()
+                    .map(i -> i.requestedBy() + " 要求 " + i.expectedRange())
+                    .distinct().collect(java.util.stream.Collectors.joining("；"));
+            String actual = issues.getFirst().actualVersion();
+            if (seen.add("UPDATE_MOD|" + target)) {
+                actions.add(new PlannedAction(ActionKind.UPDATE_MOD, target, jar,
+                        Diagnosis.Kind.MOD_VERSION_MISMATCH.name(),
+                        constraints + "；当前 " + actual + "；" + versionStrategy.title(),
+                        texts(issues), null, null,
+                        ranges.size() == 1 ? ranges.getFirst() : null, ranges, versionStrategy));
             }
         }
 
@@ -130,6 +171,7 @@ public final class ActionPlanner {
         actions.stream().filter(a -> a.kind() == ActionKind.REMOVE_MOD)
                 .forEach(a -> removed.add(a.modId()));
         actions.removeIf(a -> a.kind() == ActionKind.INSTALL_DEP && removed.contains(a.target()));
+        actions.removeIf(a -> a.kind() == ActionKind.UPDATE_MOD && removed.contains(a.modId()));
 
         return new ActionPlan(actions, blocked, notes);
     }
@@ -208,6 +250,7 @@ public final class ActionPlanner {
             case DUPLICATE_MOD -> "重复模组或重复类";
             case MOD_LOAD_FAILURE -> "模组自身加载失败";
             case CRASH_OTHER -> "其它启动崩溃";
+            case ENVIRONMENT -> "环境或资源故障";
             case BAD_VERSION_FORMAT -> "版本号格式非法（加载器解析不了它声明的版本号）";
             case CAUSED_BY_ATTRIBUTED -> "崩溃链归因（Caused by 里的 from mod）";
             case STACK_ATTRIBUTED -> "堆栈归因（最低置信）";

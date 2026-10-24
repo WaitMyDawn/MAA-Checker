@@ -37,6 +37,7 @@ class FlakyRetryPolicyTest {
     void 缺前置与加载器版本不足不重试() {
         assertFalse(CheckerEngine.onlyNonDependencyIssues(of(Diagnosis.Kind.MISSING_REQUIRED)));
         assertFalse(CheckerEngine.onlyNonDependencyIssues(of(Diagnosis.Kind.LOADER_TOO_OLD)));
+        assertFalse(CheckerEngine.onlyNonDependencyIssues(of(Diagnosis.Kind.ENVIRONMENT)));
         assertFalse(CheckerEngine.onlyNonDependencyIssues(
                 of(Diagnosis.Kind.MOD_LOAD_FAILURE, Diagnosis.Kind.MISSING_REQUIRED)),
                 "只要掺了确定性问题，就不该把整轮判成偶发");

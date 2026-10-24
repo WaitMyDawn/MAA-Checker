@@ -226,6 +226,11 @@ public final class ProxyConfig {
         return detectWindowsRegistryProxy();
     }
 
+    /** 只读取已经声明的系统代理，不扫描端口，也不发起探活请求。 */
+    public static String passiveSystemProxy() {
+        return normalize(detectSystem());
+    }
+
     /** Clash Verge / v2rayN 勾"系统代理"后写的就是这两个键；用 reg.exe 读，免得引第三方依赖 */
     static String detectWindowsRegistryProxy() {
         if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) return null;

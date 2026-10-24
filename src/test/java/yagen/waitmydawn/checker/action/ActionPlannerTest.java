@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import yagen.waitmydawn.checker.core.Diagnosis;
 import yagen.waitmydawn.checker.core.StaticDepsScanner;
+import yagen.waitmydawn.checker.core.VersionUpdateStrategy;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -157,6 +158,34 @@ class ActionPlannerTest {
 
         assertEquals(1, plan.actions().size(), "低置信渠道每轮只采纳一个：" + plan.actions());
         assertTrue(plan.notes().stream().anyMatch(n -> n.contains("留到下一轮")), plan.notes().toString());
+    }
+
+    @Test
+    void 版本区间问题按目标模组合并并生成更新动作() {
+        Diagnosis diag = new Diagnosis(List.of(
+                issue(Diagnosis.Kind.MOD_VERSION_MISMATCH, "irons_spellbooks",
+                        "apprenticecodex", "[1.21.1-3.16.3,1.21.1-4.0.0)", "1.21.1-3.15.0"),
+                issue(Diagnosis.Kind.MOD_VERSION_MISMATCH, "irons_spellbooks",
+                        "farmers_spell", "[1.21.1-3.16.0,)", "1.21.1-3.15.0"),
+                issue(Diagnosis.Kind.MOD_VERSION_MISMATCH, "curios",
+                        "create_wizardry", "[9.4.2+1.21.1,)", "9.2.2+1.21.1")
+                ), List.of(), null, false, "n");
+        Map<String, String> jars = Map.of(
+                "irons_spellbooks", "irons_spellbooks-1.21.1-3.15.0.jar",
+                "curios", "curios-neoforge-9.2.2+1.21.1.jar");
+
+        ActionPlan plan = ActionPlanner.plan("neoforge", diag, report(Map.of()), jars,
+                Tombstones.load(Path.of("build/tmp/t6")), 40, VersionUpdateStrategy.MINIMUM);
+
+        assertEquals(2, plan.actions().size(), plan.actions().toString());
+        PlannedAction iron = plan.actions().stream()
+                .filter(action -> action.modId().equals("irons_spellbooks")).findFirst().orElseThrow();
+        assertEquals(ActionKind.UPDATE_MOD, iron.kind());
+        assertEquals(List.of("[1.21.1-3.16.3,1.21.1-4.0.0)", "[1.21.1-3.16.0,)"),
+                iron.versionRanges());
+        assertEquals(VersionUpdateStrategy.MINIMUM, iron.versionStrategy());
+        assertTrue(iron.reason().contains("apprenticecodex"));
+        assertTrue(iron.reason().contains("farmers_spell"));
     }
 
     private static Diagnosis.Issue issue(Diagnosis.Kind kind, String modId, String requestedBy,

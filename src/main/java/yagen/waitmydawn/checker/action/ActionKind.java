@@ -6,6 +6,8 @@ public enum ActionKind {
     UPGRADE_LOADER,
     /** B：从 Modrinth 补装缺失的前置（装完记录来源，还原=删掉这个文件） */
     INSTALL_DEP,
+    /** D：用满足全部版本区间的新版本替换现有模组（先装新文件，再移走旧文件） */
+    UPDATE_MOD,
     /** C：摘除模组（移动到 bin/，不是真删；记录类别与报错原文） */
     REMOVE_MOD
 }

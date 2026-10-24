@@ -1,5 +1,10 @@
 package yagen.waitmydawn.checker.core;
 
+import yagen.waitmydawn.checker.task.TaskContext;
+import yagen.waitmydawn.checker.task.TaskSnapshot;
+import yagen.waitmydawn.checker.task.ProcessScope;
+import yagen.waitmydawn.checker.task.ProcessLog;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -40,6 +45,10 @@ import java.util.stream.Stream;
  * </ol>
  */
 public final class InstanceLauncher {
+
+    public static boolean libraryApplies(JsonNode library) {
+        return rulesAllow(library.path("rules"), osName(), defaultFeatures());
+    }
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -102,6 +111,68 @@ public final class InstanceLauncher {
         return 8;
     }
 
+    /**
+     * 版本配置引用的实例私有库检查结果。
+     *
+     * @param managed  版本配置是否声明了 {@code maaCheckerRuntime}
+     * @param root     解析后的库目录（未受管时为共享 libraries）
+     * @param missing  当前平台需要的缺失库数量
+     * @param examples 缺失库的相对路径示例，最多由调用方指定数量
+     */
+    public record LibraryCheck(boolean managed, Path root, int missing, List<String> examples) {
+        public LibraryCheck {
+            examples = List.copyOf(examples);
+        }
+
+        public boolean complete() {
+            return missing == 0;
+        }
+    }
+
+    /**
+     * 按与启动器相同的平台规则检查版本配置引用的实例私有库是否存在。
+     *
+     * <p>轮次恢复在切换版本配置之前调用此检查：目标配置引用尚未发布的运行库时，先停止恢复，
+     * 避免产生“配置已切换但库缺失”的可执行窗口。未声明 {@code maaCheckerRuntime} 的配置
+     * 使用共享 libraries，该目录不属于轮次快照范围，因此返回未受管结果而不阻断恢复。
+     *
+     * @param limit 收集的缺失示例上限；负数按 0 处理
+     */
+    public static LibraryCheck checkPrivateLibraries(GameInstance inst, Path versionJson, int limit)
+            throws IOException {
+        JsonNode version = MAPPER.readTree(Files.readString(versionJson, StandardCharsets.UTF_8));
+        if (!version.has("maaCheckerRuntime")) {
+            return new LibraryCheck(false, inst.gameRoot().resolve("libraries"), 0, List.of());
+        }
+        Path root;
+        try {
+            root = InstanceStorage.libraries(inst, version.path("maaCheckerRuntime").asText(), false);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("版本配置中的实例运行库标识无效", e);
+        }
+        int missing = 0;
+        List<String> examples = new ArrayList<>();
+        Set<String> checked = new HashSet<>();
+        for (JsonNode library : version.path("libraries")) {
+            if (!rulesAllow(library.path("rules"), osName(), defaultFeatures())) continue;
+            String relative = library.path("downloads").path("artifact").path("path").asText("");
+            if (relative.isBlank()) continue;
+            checked.add(relative);
+            if (!Files.isRegularFile(root.resolve(relative))) {
+                missing++;
+                if (examples.size() < Math.max(0, limit)) examples.add(relative);
+            }
+        }
+        for (String relative : LoaderRuntimeLayout.requiredFiles(version)) {
+            if (!checked.add(relative)) continue;
+            if (!Files.isRegularFile(root.resolve(relative))) {
+                missing++;
+                if (examples.size() < Math.max(0, limit)) examples.add(relative);
+            }
+        }
+        return new LibraryCheck(true, root, missing, examples);
+    }
+
     // ==================================================================================
     // 一、组装启动命令
     // ==================================================================================
@@ -140,6 +211,7 @@ public final class InstanceLauncher {
 
         Path gameRoot = inst.gameRoot();
         Path libRoot = gameRoot.resolve("libraries");
+        if (v.has("maaCheckerRuntime")) libRoot = InstanceStorage.libraries(inst, v.path("maaCheckerRuntime").asText(), false);
         String sep = System.getProperty("path.separator", ";");
         List<String> cpEntries = new ArrayList<>();
         int missingLibs = 0;
@@ -379,103 +451,136 @@ public final class InstanceLauncher {
      */
     public static LaunchResult run(LaunchSpec spec, int timeoutSeconds, int graceSeconds,
                                    Consumer<String> log) throws IOException, InterruptedException {
+        return run(spec, timeoutSeconds, graceSeconds, log, null);
+    }
+
+    public static LaunchResult run(LaunchSpec spec, int timeoutSeconds, int graceSeconds,
+                                   Consumer<String> log, TaskContext context)
+            throws IOException, InterruptedException {
+        if (context != null) context.phase(TaskSnapshot.Phase.LAUNCHING, "正在启动游戏进程");
         Files.createDirectories(spec.stdoutLog().getParent());
+        if (context != null && spec.runDir() != null && Files.exists(spec.latestLog(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            Path latest = spec.latestLog().toAbsolutePath().normalize();
+            if (!Files.isRegularFile(latest, java.nio.file.LinkOption.NOFOLLOW_LINKS) || !latest.toRealPath().equals(latest)) {
+                throw new IOException("启动日志不是普通文件，拒绝移动");
+            }
+            // 连续两次崩溃可能生成逐字相同的日志，内容锚点无法区分截断重写与未更新。
+            // 为受任务服务管理的启动保存上一份日志，让本次证据从独立文件开始。
+            Files.move(latest, spec.runDir().resolve("previous-latest.log"));
+            log.accept("上一轮 latest.log 已保存在本次报告目录，本次仅分析新建日志");
+        }
         Anchor anchor = captureAnchor(spec.latestLog());
         if (anchor.usable()) {
             log.accept("（启动前 latest.log 已有 " + anchor.offset()
                     + " 字符，只认该偏移之后的新内容）");
         }
         long t0 = System.currentTimeMillis();
-        Process p = new ProcessBuilder(spec.command())
-                .directory(spec.workDir().toFile())
-                .redirectErrorStream(true)
-                .redirectOutput(spec.stdoutLog().toFile())
-                .start();
-        log.accept("进程已启动 pid=" + p.pid() + "（-Xmx" + spec.command().get(1).substring(4)
-                + "），监视 " + spec.latestLog());
+        try (var output = new ProcessLog(spec.stdoutLog());
+             var processes = new ProcessScope()) {
+            Process p = processes.start(new ProcessBuilder(spec.command())
+                    .directory(spec.workDir().toFile())
+                    .redirectErrorStream(true));
+            output.attach(p);
+            log.accept("进程已启动 pid=" + p.pid() + "（-Xmx" + spec.command().get(1).substring(4)
+                    + "），监视 " + spec.latestLog());
 
-        long deadline = t0 + timeoutSeconds * 1000L;
-        long passSeenAt = -1L;
-        String evidence = null;
-        LaunchVerdict verdict = null;
-        List<String> timeline = new ArrayList<>();
-        Set<String> seenProgress = new HashSet<>();
+            if (context != null) context.phase(TaskSnapshot.Phase.OBSERVING, "正在观察启动日志");
+            long deadline = t0 + timeoutSeconds * 1000L;
+            long passSeenAt = -1L;
+            String evidence = null;
+            LaunchVerdict verdict = null;
+            List<String> timeline = new ArrayList<>();
+            Set<String> seenProgress = new HashSet<>();
 
-        while (verdict == null) {
-            Thread.sleep(POLL_MS);
-            String text = readText(spec.latestLog());
-            if (text != null) {
-                String fresh = sliceAfterAnchor(text, anchor);
-                for (String m : PROGRESS_MARKERS) {
-                    if (!seenProgress.contains(m) && fresh.contains(m)) {
-                        seenProgress.add(m);
-                        String line = secs(t0) + "s: " + m;
-                        timeline.add(line);
-                        log.accept("   …进度 " + line);
+            while (verdict == null) {
+                if (context != null) context.checkpoint();
+                Thread.sleep(POLL_MS);
+                String text = readText(spec.latestLog());
+                if (text != null) {
+                    String fresh = sliceAfterAnchor(text, anchor);
+                    for (String m : PROGRESS_MARKERS) {
+                        if (!seenProgress.contains(m) && fresh.contains(m)) {
+                            seenProgress.add(m);
+                            String line = secs(t0) + "s: " + m;
+                            timeline.add(line);
+                            log.accept("   …进度 " + line);
+                        }
                     }
-                }
-                for (String m : FAILURE_MARKERS) {
-                    if (fresh.contains(m)) {
-                        evidence = m;
-                        log.accept("❌ 命中崩溃判据 \"" + m + "\"（启动后 " + secs(t0)
-                                + "s），等 " + (FAIL_BLOCK_SETTLE_MS / 1000) + "s 抓完整明细块…");
-                        // 明细块（Mod ID 列表）是同一秒内继续写出的，立刻抓只会拿到表头
-                        Thread.sleep(FAIL_BLOCK_SETTLE_MS);
-                        verdict = LaunchVerdict.FAIL;
-                        break;
-                    }
-                }
-                if (verdict == null && passSeenAt < 0) {
-                    for (String m : SUCCESS_MARKERS) {
+                    for (String m : FAILURE_MARKERS) {
                         if (fresh.contains(m)) {
-                            passSeenAt = System.currentTimeMillis();
                             evidence = m;
-                            log.accept("✅ 命中主菜单判据 \"" + m + "\"（启动后 " + secs(t0)
-                                    + "s），再观察 " + graceSeconds + "s 确认不会刚进界面就崩…");
+                            log.accept("❌ 命中崩溃判据 \"" + m + "\"（启动后 " + secs(t0)
+                                    + "s），等 " + (FAIL_BLOCK_SETTLE_MS / 1000) + "s 抓完整明细块…");
+                            // 明细块（Mod ID 列表）是同一秒内继续写出的，立刻抓只会拿到表头
+                            Thread.sleep(FAIL_BLOCK_SETTLE_MS);
+                            verdict = LaunchVerdict.FAIL;
                             break;
                         }
                     }
+                    if (verdict == null && passSeenAt < 0) {
+                        for (String m : SUCCESS_MARKERS) {
+                            if (fresh.contains(m)) {
+                                passSeenAt = System.currentTimeMillis();
+                                evidence = m;
+                                log.accept("✅ 命中主菜单判据 \"" + m + "\"（启动后 " + secs(t0)
+                                        + "s），再观察 " + graceSeconds + "s 确认不会刚进界面就崩…");
+                                break;
+                            }
+                        }
+                    }
+                }
+                long now = System.currentTimeMillis();
+                if (verdict == null && !p.isAlive()) {
+                    int code = p.exitValue();
+                    evidence = "进程退出 code=" + code;
+                    verdict = code != 0 ? LaunchVerdict.FAIL : LaunchVerdict.EXITED;
+                    log.accept("⚠️ 游戏进程已自行退出 code=" + code);
+                }
+                if (verdict == null && passSeenAt > 0 && now - passSeenAt >= graceSeconds * 1000L && p.isAlive()) {
+                    verdict = LaunchVerdict.PASS;
+                }
+                if (verdict == null && now > deadline) {
+                    evidence = timeoutSeconds + "s 内未命中任何结论性标记";
+                    verdict = LaunchVerdict.TIMEOUT;
+                    log.accept("⏱️ 超时：" + evidence);
                 }
             }
-            long now = System.currentTimeMillis();
-            if (verdict == null && passSeenAt > 0 && now - passSeenAt >= graceSeconds * 1000L) {
-                verdict = LaunchVerdict.PASS;
-            }
-            if (verdict == null && !p.isAlive()) {
-                int code = p.exitValue();
-                evidence = "进程退出 code=" + code;
-                verdict = code != 0 ? LaunchVerdict.FAIL : LaunchVerdict.EXITED;
-                log.accept("⚠️ 游戏进程已自行退出 code=" + code);
-            }
-            if (verdict == null && now > deadline) {
-                evidence = timeoutSeconds + "s 内未命中任何结论性标记";
-                verdict = LaunchVerdict.TIMEOUT;
-                log.accept("⏱️ 超时：" + evidence);
-            }
-        }
 
-        // 结论落地前再等一会儿，保证明细块/崩溃报告写盘完成
-        Thread.sleep(800L);
-        Path freshLog = spec.runDir() == null ? null : spec.runDir().resolve("fresh-latest.log");
-        if (freshLog != null) {
-            String text = readText(spec.latestLog());
-            String fresh = sliceAfterAnchor(text, anchor);
-            Files.createDirectories(freshLog.getParent());
-            // 只写日志本身、不加任何头注释：诊断器要按行匹配，掺进自己的注释会污染证据
-            Files.writeString(freshLog, fresh, StandardCharsets.UTF_8);
-            log.accept("本次新增日志切片 " + fresh.length() + " 字符（" + anchorVerdict(text, anchor)
-                    + "）");
-        }
+            // 结论落地前再等一会儿，保证明细块/崩溃报告写盘完成
+            Thread.sleep(800L);
+            if (context != null) context.checkpoint();
+            if (verdict == LaunchVerdict.PASS) {
+                String finalLog = sliceAfterAnchor(readText(spec.latestLog()), anchor);
+                String failure = FAILURE_MARKERS.stream().filter(finalLog::contains).findFirst().orElse(null);
+                if (failure != null) {
+                    verdict = LaunchVerdict.FAIL;
+                    evidence = failure;
+                } else if (!p.isAlive()) {
+                    verdict = p.exitValue() == 0 ? LaunchVerdict.EXITED : LaunchVerdict.FAIL;
+                    evidence = "观察结束时进程已退出 code=" + p.exitValue();
+                }
+            }
+            Path freshLog = spec.runDir() == null ? null : spec.runDir().resolve("fresh-latest.log");
+            if (freshLog != null) {
+                String text = readText(spec.latestLog());
+                String fresh = sliceAfterAnchor(text, anchor);
+                Files.createDirectories(freshLog.getParent());
+                // 只写日志本身、不加任何头注释：诊断器要按行匹配，掺进自己的注释会污染证据
+                Files.writeString(freshLog, fresh, StandardCharsets.UTF_8);
+                log.accept("本次新增日志切片 " + fresh.length() + " 字符（" + anchorVerdict(text, anchor)
+                        + "）");
+            }
 
-        boolean killed = false;
-        if (p.isAlive()) {
-            killTree(p);
-            killed = true;
-            log.accept("已结束游戏进程 pid=" + p.pid() + "（连同子进程）");
+            boolean killed = false;
+            if (p.isAlive()) {
+                processes.close();
+                killed = true;
+                log.accept("已结束游戏进程 pid=" + p.pid() + "（连同子进程）");
+            }
+            int exitCode = p.isAlive() ? Integer.MIN_VALUE : p.exitValue();
+            return new LaunchResult(verdict, evidence, System.currentTimeMillis() - t0, exitCode,
+                    killed, spec.runDir(), spec.stdoutLog(), freshLog, List.copyOf(timeline));
         }
-        int exitCode = p.isAlive() ? Integer.MIN_VALUE : p.exitValue();
-        return new LaunchResult(verdict, evidence, System.currentTimeMillis() - t0, exitCode,
-                killed, spec.runDir(), spec.stdoutLog(), freshLog, List.copyOf(timeline));
     }
 
     /** 结束进程树：先子后父，避免 Minecraft 的子进程（如原生库加载器）变孤儿 */

@@ -88,6 +88,11 @@ public final class ActionExecutor {
                                 a.errorText(), data);
                         upgraded++;
                     }
+                    case UPDATE_MOD -> {
+                        failures.add("旧版执行入口不支持模组版本更新，请使用新版修复工作流");
+                        ledger.add("UPDATE_MOD", a.modId(), a.jarFile(), a.category(), a.reason(),
+                                a.errorText(), Map.of("result", "LEGACY_ENTRY_UNSUPPORTED"));
+                    }
                     case INSTALL_DEP -> {
                         if (nm != null && nm.removeOnly()) {
                             log.accept("   按【只做摘除并继续】执行：不再补装 " + a.modId()

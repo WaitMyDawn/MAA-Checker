@@ -11,6 +11,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CancellationException;
 import java.util.function.Consumer;
 
 /**
@@ -155,10 +156,13 @@ public final class Http {
 
     private static String fetchString(String url, Consumer<String> log, boolean nullOn404)
             throws IOException {
+        checkInterrupted();
         try {
             HttpResponse<String> r = send(url, HttpResponse.BodyHandlers.ofString(), log, nullOn404);
             return r.statusCode() == 404 ? null : r.body();
         } catch (IOException e) {
+            checkInterrupted();
+            if (e instanceof HttpStatusException) throw e;
             if (!curlAvailable()) throw e;
             if (log != null) {
                 log.accept("   ↺ Java 网络栈失败（" + e.getMessage() + "），改用系统 curl 兜底");
@@ -230,15 +234,18 @@ public final class Http {
      */
     public static DownloadOutcome download(String url, Path target, Consumer<String> log,
                                            long expectedBytes, int maxRedirects) {
+        checkInterrupted();
         try {
             Files.createDirectories(target.getParent());
         } catch (IOException e) {
+            checkInterrupted();
             return new DownloadOutcome(false, 0, FailureKind.OTHER, "建目录失败: " + e.getMessage(), -1);
         }
         if (!curlAvailable()) {
             return javaDownload(url, target, log, expectedBytes);
         }
         Path tmp = target.resolveSibling(target.getFileName() + ".part");
+        boolean published = false;
         try {
             Files.deleteIfExists(tmp);
             List<String> cmd = new java.util.ArrayList<>(List.of("curl.exe", "-sSL",
@@ -266,7 +273,13 @@ public final class Http {
             int code = parseStatus(out);
             long size = Files.exists(tmp) ? Files.size(tmp) : 0;
             if (code == 200 || code == 206) {
+                String incomplete = sizeFailure(size, expectedBytes);
+                if (incomplete != null) {
+                    Files.deleteIfExists(tmp);
+                    return new DownloadOutcome(false, size, FailureKind.UNSTABLE, incomplete, code);
+                }
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                published = true;
                 if (log != null) {
                     log.accept(String.format(Locale.ROOT, "      ↓ %.2f MB / %.1fs（%.0f KB/s）%s",
                             size / 1048576.0, (System.currentTimeMillis() - t0) / 1000.0,
@@ -278,6 +291,12 @@ public final class Http {
             Files.deleteIfExists(tmp);
             return new DownloadOutcome(false, size, FailureKind.HTTP_STATUS,
                     "服务器返回 HTTP " + code, code);
+        } catch (CancellationException e) {
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException ignored) {
+            }
+            throw e;
         } catch (IOException e) {
             long size = 0;
             try {
@@ -305,6 +324,8 @@ public final class Http {
                 default -> msg;
             };
             return new DownloadOutcome(false, size, kind, human, -1);
+        } finally {
+            if (!published) deleteTemporary(tmp);
         }
     }
 
@@ -312,6 +333,7 @@ public final class Http {
     private static DownloadOutcome javaDownload(String url, Path target, Consumer<String> log,
                                                 long expectedBytes) {
         Path part = target.resolveSibling(target.getFileName() + ".part");
+        boolean published = false;
         try {
             Files.deleteIfExists(part);
             HttpResponse<Path> r = send(url, HttpResponse.BodyHandlers.ofFile(part), log);
@@ -320,9 +342,23 @@ public final class Http {
                 return new DownloadOutcome(false, 0, FailureKind.HTTP_STATUS,
                         "服务器返回 HTTP " + r.statusCode(), r.statusCode());
             }
+            long size = Files.size(part);
+            String incomplete = sizeFailure(size, expectedBytes);
+            if (incomplete != null) {
+                Files.deleteIfExists(part);
+                return new DownloadOutcome(false, size, FailureKind.UNSTABLE, incomplete, r.statusCode());
+            }
             Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
+            published = true;
             return DownloadOutcome.success(Files.size(target));
+        } catch (CancellationException e) {
+            try {
+                Files.deleteIfExists(part);
+            } catch (IOException ignored) {
+            }
+            throw e;
         } catch (IOException e) {
+            checkInterrupted();
             try {
                 Files.deleteIfExists(part);
             } catch (IOException ignored) {
@@ -330,24 +366,57 @@ public final class Http {
             return new DownloadOutcome(false, 0,
                     isConnectLevelFailure(e) ? FailureKind.CONNECT : FailureKind.OTHER,
                     String.valueOf(e.getMessage()), -1);
+        } finally {
+            if (!published) deleteTemporary(part);
+        }
+    }
+
+    private static String sizeFailure(long actual, long expected) {
+        if (actual <= 0) return "下载结果为空，未发布文件";
+        if (expected > 0 && actual != expected) {
+            return "下载长度不符：期望 " + expected + " 字节，实际 " + actual + " 字节";
+        }
+        return null;
+    }
+
+    private static void deleteTemporary(Path path) {
+        boolean interrupted = Thread.interrupted();
+        try {
+            for (int attempt = 0; attempt < 5; attempt++) {
+                try {
+                    Files.deleteIfExists(path);
+                    return;
+                } catch (IOException e) {
+                    if (attempt == 4) return;
+                    try {
+                        Thread.sleep(50);
+                    } catch (InterruptedException ex) {
+                        interrupted = true;
+                    }
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
         }
     }
 
     /** curl 退出码非 0 时抛出，把 curl 自己的错误文本带出来（分类靠它） */
-    private static String runCaptureOrThrow(List<String> cmd) throws IOException {
-        try {
-            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
-            String out = new String(p.getInputStream().readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8);
+    static String runCaptureOrThrow(List<String> cmd) throws IOException {
+        checkInterrupted();
+        Path output = Files.createTempFile("maa-checker-curl", ".log");
+        try (var processes = new yagen.waitmydawn.checker.task.ProcessScope()) {
+            Process p = processes.start(new ProcessBuilder(cmd).redirectErrorStream(true)
+                    .redirectOutput(output.toFile()));
             int code = p.waitFor();
+            String out = Files.readString(output);
             if (code != 0) {
                 throw new IOException("curl: " + out.strip().replaceAll("\\R+", " "));
             }
             return out;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IOException("curl 被中断", e);
-        }
+            throw new java.util.concurrent.CancellationException("网络任务已停止");
+        } finally { Files.deleteIfExists(output); }
     }
 
     // ------------------------------------------------------------------ curl 兜底
@@ -355,13 +424,13 @@ public final class Http {
     private static Boolean curlPresent;
 
     static synchronized boolean curlAvailable() {
+        checkInterrupted();
         if (curlPresent == null) {
             try {
-                Process p = new ProcessBuilder("curl.exe", "--version")
-                        .redirectErrorStream(true).start();
-                p.getInputStream().readAllBytes();
-                curlPresent = p.waitFor() == 0;
+                runCaptureOrThrow(List.of("curl.exe", "--version"));
+                curlPresent = true;
             } catch (Exception e) {
+                checkInterrupted();
                 curlPresent = false;
             }
         }
@@ -393,17 +462,7 @@ public final class Http {
 
     /** 跑 curl 并返回 stdout（含 -w 写的状态码）；退出码非 0 视为传输层失败 */
     private static String runCapture(List<String> cmd) throws IOException {
-        try {
-            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
-            String out = new String(p.getInputStream().readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8);
-            int code = p.waitFor();
-            if (code != 0) throw new IOException("curl 失败: " + out.strip());
-            return out;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("curl 被中断", e);
-        }
+        return runCaptureOrThrow(cmd);
     }
 
     /** curl -w '%{http_code}' 输出里取状态码（最后一行是状态码，前面可能混着错误信息） */
@@ -429,6 +488,7 @@ public final class Http {
             throws IOException {
         IOException last = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            checkInterrupted();
             try {
                 HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                         .header("User-Agent", UA)
@@ -447,8 +507,9 @@ public final class Http {
                 last = new IOException("HTTP " + code + " " + url);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new IOException("被中断: " + url, e);
+                throw new java.util.concurrent.CancellationException("网络请求已停止");
             } catch (IOException e) {
+                if (e instanceof HttpStatusException) throw e;
                 last = e;
                 // 连接层面的失败是"确定性"的：连接被拒/超时/域名解析不了，重试只是浪费时间，
                 // 而且会拖慢"直连不通 → 转代理"的切换（实测把一次切换拖到 40 秒以上）。
@@ -460,11 +521,15 @@ public final class Http {
                     Thread.sleep(1000L * attempt);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw new IOException("被中断: " + url, ie);
+                    throw new java.util.concurrent.CancellationException("网络重试已停止");
                 }
             }
         }
         throw last == null ? new IOException("请求失败: " + url) : last;
+    }
+
+    private static void checkInterrupted() {
+        if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException("网络任务已停止");
     }
 
     /** 连接级失败（重试无意义）：拒绝连接、连接超时、域名解析失败 */

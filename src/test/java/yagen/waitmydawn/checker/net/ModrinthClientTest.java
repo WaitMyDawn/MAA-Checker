@@ -153,6 +153,91 @@ class ModrinthClientTest {
         assertEquals(2, res.sameName().size(), "同名候选要如实登记：不猜是哪一个");
     }
 
+    @Test
+    void 已安装模组更新只列出同时满足全部区间的版本() throws Exception {
+        Map<String, String> api = new LinkedHashMap<>();
+        api.put("/search?", """
+                {"hits":[{"project_id":"R2OftAxM","slug":"farmers-delight",
+                          "title":"Farmer's Delight"}]}
+                """);
+        api.put("/project/farmers-delight", """
+                {"id":"R2OftAxM","slug":"farmers-delight","title":"Farmer's Delight",
+                 "project_type":"mod","loaders":["neoforge"]}
+                """);
+        api.put("/project/farmers-delight/version", """
+                [{"id":"v131","version_number":"1.21.1-1.3.1",
+                  "date_published":"2026-01-01T00:00:00Z",
+                  "files":[{"primary":true,"filename":"FarmersDelight-1.3.1.jar",
+                            "url":"https://cdn.example/fd-1.3.1.jar","size":2048}]},
+                 {"id":"v132","version_number":"1.21.1-1.3.2",
+                  "date_published":"2026-02-01T00:00:00Z",
+                  "files":[{"primary":true,"filename":"FarmersDelight-1.3.2.jar",
+                            "url":"https://cdn.example/fd-1.3.2.jar","size":2048}]},
+                 {"id":"v140","version_number":"1.21.1-1.4.0",
+                  "date_published":"2026-03-01T00:00:00Z",
+                  "files":[{"primary":true,"filename":"FarmersDelight-1.4.0.jar",
+                            "url":"https://cdn.example/fd-1.4.0.jar","size":2048}]}]
+                """);
+
+        ModrinthClient.VersionResolution result = ModrinthClient.resolveVersions(
+                "farmersdelight", "Farmer's Delight", "1.21.1", "neoforge",
+                List.of("[1.3.2,)"), fake(api), null);
+
+        assertEquals(List.of("1.21.1-1.4.0", "1.21.1-1.3.2"),
+                result.candidates().stream().map(ModrinthClient.Candidate::versionNumber).toList());
+        assertTrue(result.rejected().isEmpty());
+    }
+
+    @Test
+    void 多个版本区间必须全部满足_不能退用不兼容的最新版() throws Exception {
+        Map<String, String> api = new LinkedHashMap<>();
+        api.put("/search?", """
+                {"hits":[{"project_id":"s4OWxYQQ","slug":"irons-spells-n-spellbooks",
+                          "title":"Iron's Spells 'n Spellbooks"}]}
+                """);
+        api.put("/project/irons-spells-n-spellbooks", """
+                {"id":"s4OWxYQQ","slug":"irons-spells-n-spellbooks",
+                 "title":"Iron's Spells 'n Spellbooks",
+                 "project_type":"mod","loaders":["neoforge"]}
+                """);
+        api.put("/project/irons-spells-n-spellbooks/version", """
+                [{"id":"v315","version_number":"1.21.1-3.15.0",
+                  "date_published":"2026-01-01T00:00:00Z",
+                  "files":[{"primary":true,"filename":"irons-3.15.0.jar",
+                            "url":"https://cdn.example/irons-3.15.0.jar","size":2048}]},
+                 {"id":"v3163","version_number":"1.21.1-3.16.3",
+                  "date_published":"2026-02-01T00:00:00Z",
+                  "files":[{"primary":true,"filename":"irons-3.16.3.jar",
+                            "url":"https://cdn.example/irons-3.16.3.jar","size":2048}]},
+                 {"id":"v400","version_number":"1.21.1-4.0.0",
+                  "date_published":"2026-03-01T00:00:00Z",
+                  "files":[{"primary":true,"filename":"irons-4.0.0.jar",
+                            "url":"https://cdn.example/irons-4.0.0.jar","size":2048}]}]
+                """);
+
+        ModrinthClient.VersionResolution result = ModrinthClient.resolveVersions(
+                "irons_spellbooks", "Iron's Spells 'n Spellbooks", "1.21.1", "neoforge",
+                List.of("[1.21.1-3.16.3,1.21.1-4.0.0)", "[1.21.1-3.16.0,)"),
+                fake(api), null);
+
+        assertEquals(List.of("1.21.1-3.16.3"),
+                result.candidates().stream().map(ModrinthClient.Candidate::versionNumber).toList());
+    }
+
+    @Test
+    void 版本号里的Minecraft前缀不能影响依赖区间比较() {
+        assertEquals("1.3.1",
+                ModrinthClient.versionForRange("1.21.1-1.3.1", "1.21.1"));
+        assertEquals("9.5.1+1.21.1",
+                ModrinthClient.versionForRange("9.5.1+1.21.1", "1.21.1"));
+        assertEquals("1.21.10-1.0.0",
+                ModrinthClient.versionForRange("1.21.10-1.0.0", "1.21.1"));
+        assertEquals("[3.16.3,4.0.0)",
+                ModrinthClient.rangeForMc("[1.21.1-3.16.3,1.21.1-4.0.0)", "1.21.1"));
+        assertEquals("[9.5.1+1.21.1,)",
+                ModrinthClient.rangeForMc("[9.5.1+1.21.1,)", "1.21.1"));
+    }
+
     /**
      * 按 URL 关键字匹配的假取数器；没配到的一律当 404（null），与真实 API 行为一致。
      *

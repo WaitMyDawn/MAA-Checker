@@ -40,6 +40,7 @@ public final class ModJarIndex {
         private final Map<String, String> jarOf;
         private final Map<String, String> jarOfLower = new LinkedHashMap<>();
         private final Map<String, String> versionOfLower = new LinkedHashMap<>();
+        private final Map<String, String> titleOfLower = new LinkedHashMap<>();
         private final Map<String, List<String>> modIdsByVersion = new LinkedHashMap<>();
 
         Meta(Map<String, String> jarOf) {
@@ -47,11 +48,13 @@ public final class ModJarIndex {
             jarOf.forEach((k, v) -> jarOfLower.putIfAbsent(lower(k), v));
         }
 
-        void put(String modId, String jarFile, String version) {
+        void put(String modId, String jarFile, String version, String displayName) {
             boolean first = jarOf.putIfAbsent(modId, jarFile) == null;
             jarOfLower.putIfAbsent(lower(modId), jarFile);
             if (!first) return;                  // 同一个 modId 只记一次（否则"版本→modId"会重复计数）
             versionOfLower.putIfAbsent(lower(modId), version == null ? "?" : version);
+            titleOfLower.putIfAbsent(lower(modId),
+                    displayName == null || displayName.isBlank() ? modId : displayName);
             if (version != null && !version.isBlank()) {
                 modIdsByVersion.computeIfAbsent(lower(version), k -> new ArrayList<>()).add(modId);
             }
@@ -68,6 +71,10 @@ public final class ModJarIndex {
 
         public String versionOf(String modId) {
             return modId == null ? null : versionOfLower.get(lower(modId));
+        }
+
+        public String titleOf(String modId) {
+            return modId == null ? null : titleOfLower.get(lower(modId));
         }
 
         /** 精确等于该声明版本的 modId（忽略大小写与首尾空白；找不到返回空表） */
@@ -107,7 +114,7 @@ public final class ModJarIndex {
         for (Path jar : jars) {
             String fileName = jar.getFileName().toString();
             for (JarModReader.Mod m : JarModReader.read(jar)) {
-                meta.put(m.modId(), fileName, m.version());
+                meta.put(m.modId(), fileName, m.version(), m.displayName());
             }
         }
         return meta;

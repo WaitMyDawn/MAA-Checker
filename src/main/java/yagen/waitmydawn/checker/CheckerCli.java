@@ -15,6 +15,13 @@ import yagen.waitmydawn.checker.net.Http;
 import yagen.waitmydawn.checker.net.NetworkAskers;
 import yagen.waitmydawn.checker.net.NetworkManager;
 import yagen.waitmydawn.checker.ui.CheckerGui;
+import yagen.waitmydawn.checker.task.CheckerTasks;
+import yagen.waitmydawn.checker.task.RepairPolicy;
+import yagen.waitmydawn.checker.task.RepairWorkflow;
+import yagen.waitmydawn.checker.task.TaskService;
+import yagen.waitmydawn.checker.task.TaskEvent;
+import yagen.waitmydawn.checker.task.TaskResult;
+import yagen.waitmydawn.checker.task.TaskSnapshot;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -22,19 +29,32 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * 命令行入口。
  *
- * <p>只做三件事：解析参数、装配 {@link CheckerEngine.Options}、调用引擎。
- * 真正的流程（检验/修复/还原）在 {@link CheckerEngine} 里，和 GUI 完全共用——
- * 这样"命令行能跑通的行为"与"界面里点出来的行为"不会漂移。
+ * <p>负责解析参数、装配选项并分发到新版任务服务或显式旧版兼容入口。检查始终使用
+ * {@link CheckerTasks}；修复和还原默认使用 {@link RepairWorkflow}，旧 A/B/C 台账只能通过
+ * {@code --legacy-fix/--legacy-restore} 显式启用。
  *
  * <p>不带任何参数启动 = 打开图形界面（双击 jar 或 launcher 的 launch.bat 就是这个路径）。
  */
 public final class CheckerCli {
 
     public static void main(String[] args) throws Exception {
+        int code;
+        try {
+            code = run(args);
+        } catch (Exception e) {
+            System.err.println("MAA-Checker 执行失败：" + e.getMessage());
+            code = 2;
+        }
+        System.exit(code);
+    }
+
+    /** 可直接测试的命令行执行入口；除启动 Swing/JavaFX 外不主动终止 JVM。 */
+    static int run(String[] args) throws Exception {
         // 必须在任何网络类初始化之前执行：实测 Java 走 IPv6 连 maven.neoforged.net 会卡死到超时，
         // 强制 IPv4 后同一文件 3.5s 下完（curl 两种协议栈都正常）。想用 IPv6 可加 -Dmaa.preferIPv6=true。
         if (!"true".equalsIgnoreCase(System.getProperty("maa.preferIPv6"))) {
@@ -70,6 +90,11 @@ public final class CheckerCli {
         String probeMc = "1.21.1";
         String probeLoader = "neoforge";
         Integer restoreRound = null;
+        String policyChoice = "saved";
+        boolean policyExplicit = false;
+        boolean roundsExplicit = false;
+        boolean onExhaustedExplicit = false;
+        UUID workflowId = null;
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -90,8 +115,16 @@ public final class CheckerCli {
                     mode = "fix";
                     target = args[++i];
                 }
+                case "--legacy-fix" -> {
+                    mode = "legacy-fix";
+                    target = args[++i];
+                }
                 case "--restore" -> {
                     mode = "restore";
+                    target = args[++i];
+                }
+                case "--legacy-restore" -> {
+                    mode = "legacy-restore";
                     target = args[++i];
                 }
                 case "--diagnose" -> {
@@ -116,9 +149,27 @@ public final class CheckerCli {
                 case "--mx" -> mx = args[++i];
                 case "--timeout" -> timeout = Integer.parseInt(args[++i]);
                 case "--grace" -> grace = Integer.parseInt(args[++i]);
-                case "--rounds" -> rounds = Math.max(1, Math.min(
-                        CheckerEngine.MAX_TOTAL_FIX_ROUNDS, Integer.parseInt(args[++i])));
-                case "--on-exhausted" -> onExhausted = args[++i];
+                case "--rounds" -> {
+                    rounds = Math.max(1, Math.min(
+                            CheckerEngine.MAX_TOTAL_FIX_ROUNDS, Integer.parseInt(args[++i])));
+                    roundsExplicit = true;
+                }
+                case "--on-exhausted" -> {
+                    onExhausted = args[++i];
+                    onExhaustedExplicit = true;
+                }
+                case "--policy" -> {
+                    policyChoice = args[++i];
+                    policyExplicit = true;
+                }
+                case "--workflow" -> {
+                    try {
+                        workflowId = UUID.fromString(args[++i]);
+                    } catch (IllegalArgumentException e) {
+                        System.err.println("--workflow 需要有效 UUID");
+                        return 2;
+                    }
+                }
                 case "--cascade-limit" -> cascadeLimit = Integer.parseInt(args[++i]);
                 case "--dry-run" -> dryRun = true;
                 case "--force" -> force = true;
@@ -131,14 +182,34 @@ public final class CheckerCli {
                 case "--loader" -> probeLoader = args[++i];
                 case "--help", "-h" -> {
                     printHelp();
-                    return;
+                    return 0;
                 }
                 default -> {
                     System.err.println("未知参数: " + args[i]);
                     printHelp();
-                    System.exit(2);
+                    return 2;
                 }
             }
+        }
+        if (workflowId != null && !"restore".equals(mode)) {
+            System.err.println("--workflow 只能与新版 --restore 一起使用。");
+            return 2;
+        }
+        if (policyExplicit && !"fix".equals(mode) && !"legacy-fix".equals(mode)) {
+            System.err.println("--policy 只能与 --fix 或 --legacy-fix 一起使用。");
+            return 2;
+        }
+        try {
+            CliWorkflow.policyChoice(policyChoice);
+        } catch (IllegalArgumentException e) {
+            System.err.println(e.getMessage());
+            return 2;
+        }
+        String exhausted = onExhausted.toLowerCase(java.util.Locale.ROOT);
+        if (!exhausted.equals("ask") && !exhausted.equals("stop")
+                && !exhausted.equals("keep") && !exhausted.equals("restore")) {
+            System.err.println("--on-exhausted 只允许 ask、stop、keep 或 restore：" + onExhausted);
+            return 2;
         }
 
         if (setProxy != null) {
@@ -148,12 +219,12 @@ public final class CheckerCli {
                     + ProxyConfig.loadConfigured(toolRoot));
             System.out.println(err == null ? "探活：可用 ✓"
                     : "探活：失败（" + err + "）——仍已保存，可用 --test-proxy 复查");
-            return;
+            return 0;
         }
         if (clearProxy) {
             ProxyConfig.clear(toolRoot);
             System.out.println("已清除软件里的代理设置（仍会自动探测系统代理）。");
-            return;
+            return 0;
         }
         // 代理优先级：--proxy > 软件设置 > 自动探测系统代理；探测到的会先探活，不通自动回退直连
         ProxyConfig.Setting proxySetting = ProxyConfig.resolve(cliProxy, noProxy, toolRoot,
@@ -165,40 +236,46 @@ public final class CheckerCli {
         if (gameDir == null) gameDir = yagen.waitmydawn.checker.core.GameDirLocator.detect(toolRoot);
         if (gui || "gui".equals(mode)) {
             CheckerGui.launch(toolRoot, gameDir, proxySetting);
-            return;
+            return 0;
         }
         if (testProxy) {
-            System.exit(doTestProxy(proxySetting));
+            return doTestProxy(proxySetting);
         }
         if ("probe-dep".equals(mode)) {
-            System.exit(doProbeDep(target, probeMc, probeLoader));
+            return doProbeDep(target, probeMc, probeLoader);
         }
         if ("diagnose".equals(mode)) {
-            System.exit(doDiagnose(target));
+            return doDiagnose(target);
         }
         if ("repair-libraries".equals(mode)) {
             // 需要在下面解析实例，所以放到实例查找之后处理（见 switch）
         }
         if (listJava) {
             printJava(toolRoot);
-            return;
+            return 0;
         }
         if (!Files.isDirectory(gameDir)) {
             System.err.println("游戏目录不存在: " + gameDir);
-            System.exit(2);
+            return 2;
         }
-        List<GameInstance> instances = InstanceScanner.scanAll(gameDir);
+        List<GameInstance> instances;
+        try (TaskService tasks = new TaskService()) {
+            var result = tasks.submit(gameDir.toString(), CheckerTasks.scan(gameDir), null)
+                    .completion().toCompletableFuture().get();
+            if (result.value() == null) throw new IllegalStateException(result.message(), result.cause());
+            instances = result.value();
+        }
         if (list) {
             System.out.println("--- 识别到 " + instances.size() + " 个实例（" + gameDir + "）---");
             instances.forEach(i -> System.out.println("  " + i.describe()));
             if (!instances.isEmpty()) yagen.waitmydawn.checker.core.AppConfig
                     .set(toolRoot, yagen.waitmydawn.checker.core.AppConfig.KEY_GAME_DIR,
                             gameDir.toString());
-            return;
+            return 0;
         }
         if (mode == null) {
             printHelp();
-            return;
+            return 0;
         }
         final String wanted = target;
         GameInstance inst = instances.stream().filter(i -> i.name().equals(wanted))
@@ -206,7 +283,7 @@ public final class CheckerCli {
         if (inst == null) {
             System.err.println("没找到实例 \"" + target + "\"，可用实例：");
             instances.forEach(i -> System.err.println("  " + i.name()));
-            System.exit(2);
+            return 2;
         }
         NetworkManager.Asker asker = "remove-only".equalsIgnoreCase(netPolicy)
                 || "abort".equalsIgnoreCase(netPolicy) ? null
@@ -226,15 +303,161 @@ public final class CheckerCli {
                 allowMirrorFile, roundAsker, dialog
                         ? yagen.waitmydawn.checker.ui.Notifiers.dialog()
                         : yagen.waitmydawn.checker.ui.Notifiers.console());
+        boolean interactive = dialog || System.console() != null;
         int code = switch (mode) {
             case "scan" -> doScan(inst, toolRoot);
-            case "check" -> CheckerEngine.check(inst, toolRoot, o, System.out::println);
-            case "fix" -> CheckerEngine.fix(inst, toolRoot, o, System.out::println);
-            case "restore" -> CheckerEngine.restore(inst, toolRoot, restoreRound, System.out::println);
+            case "check" -> runCheck(inst, toolRoot, o);
+            case "fix" -> runWorkflowFix(inst, toolRoot, o, policyChoice, rounds,
+                    roundsExplicit, interactive, dialog, onExhaustedExplicit);
+            case "legacy-fix" -> runLegacyFix(inst, toolRoot, o, policyChoice, onExhaustedExplicit);
+            case "restore" -> runWorkflowRestore(inst, toolRoot, workflowId, restoreRound,
+                    dryRun, System.out::println);
+            case "legacy-restore" -> runLegacyRestore(inst, toolRoot, restoreRound, workflowId);
             case "repair-libraries" -> doRepairLibraries(inst, proxySetting);
             default -> 2;
         };
-        System.exit(code);
+        return code;
+    }
+
+    private static int runWorkflowFix(GameInstance instance, Path toolRoot,
+                                      CheckerEngine.Options options, String requestedPolicy,
+                                      int rounds, boolean roundsOverride, boolean interactive,
+                                      boolean dialog, boolean onExhaustedExplicit) throws Exception {
+        System.out.println("说明：--fix 已切换到新版事务工作流。自动授权必须来自 "
+                + "--policy auto 或已保存策略；旧行为请显式使用 --legacy-fix。");
+        if (options.dryRun()) {
+            System.err.println("新版 --fix 不执行 dry-run，且不会在预演模式下修改实例；"
+                    + "如需旧版计划预演，请使用 --legacy-fix --dry-run。");
+            return CliWorkflow.EXIT_NEEDS_ATTENTION;
+        }
+        if (onExhaustedExplicit) {
+            System.err.println("--on-exhausted 属于旧版兼容参数；新版使用保存策略或 "
+                    + "--policy，并在达到轮次上限后保留暂停记录。");
+            return CliWorkflow.EXIT_NEEDS_ATTENTION;
+        }
+        CliWorkflow.PolicyChoice choice;
+        try {
+            choice = CliWorkflow.policyChoice(requestedPolicy);
+        } catch (IllegalArgumentException e) {
+            System.err.println(e.getMessage());
+            return CliWorkflow.EXIT_NEEDS_ATTENTION;
+        }
+        CliWorkflow.ResolvedPolicy resolved;
+        try {
+            resolved = CliWorkflow.resolvePolicy(instance, toolRoot, choice, rounds,
+                    roundsOverride, interactive);
+        } catch (Exception e) {
+            System.err.println("策略不可执行：" + e.getMessage());
+            return CliWorkflow.EXIT_NEEDS_ATTENTION;
+        }
+        System.out.println("修复策略：" + resolved.description()
+                + "，轮次上限 " + resolved.policy().maxRounds());
+        TaskResult<RepairWorkflow.State> result = CliWorkflow.fix(instance, toolRoot, options,
+                resolved.policy(), CliWorkflow.decider(dialog, System.out::println),
+                System.out::println);
+        System.out.println(result.message());
+        if (result.value() != null) {
+            System.out.println("工作流: " + result.value().id() + " / "
+                    + result.value().phase() + " / " + result.value().rounds().size() + " 轮");
+        }
+        return CliWorkflow.exitCode(result);
+    }
+
+    private static int runLegacyFix(GameInstance instance, Path toolRoot,
+                                    CheckerEngine.Options options, String requestedPolicy,
+                                    boolean onExhaustedExplicit) throws Exception {
+        System.out.println("警告：--legacy-fix 使用旧台账与旧 A/B/C 策略，"
+                + "仅用于兼容既有脚本；无法使用策略/历史等新版能力。");
+        if (!"saved".equalsIgnoreCase(requestedPolicy) || onExhaustedExplicit) {
+            System.out.println("提示：--policy 和 --on-exhausted 在 --legacy-fix 下由旧参数 "
+                    + "--rounds/--on-exhausted 直接控制。");
+        }
+        return CheckerEngine.fix(instance, toolRoot, options, System.out::println);
+    }
+
+    private static int runWorkflowRestore(GameInstance instance, Path toolRoot, UUID workflowId,
+                                          Integer requestedRound, boolean dryRun,
+                                          java.util.function.Consumer<String> sink) throws Exception {
+        List<RepairWorkflow.State> history;
+        try {
+            history = RepairWorkflow.history(instance);
+        } catch (Exception e) {
+            System.err.println("新版工作流历史无法读取，未回退旧台账：" + e.getMessage());
+            return CliWorkflow.EXIT_NEEDS_ATTENTION;
+        }
+        if (history.isEmpty()) {
+            if (workflowId != null) {
+                System.err.println("指定了 --workflow，但该实例没有新版工作流记录：" + workflowId);
+                return CliWorkflow.EXIT_NEEDS_ATTENTION;
+            }
+            System.out.println("没有新版事务工作流记录；使用旧台账兼容恢复。");
+            return CheckerEngine.restore(instance, toolRoot, requestedRound, sink);
+        }
+        RepairWorkflow.State state;
+        try {
+            state = CliWorkflow.selectHistory(instance, workflowId);
+        } catch (Exception e) {
+            System.err.println(e.getMessage());
+            return CliWorkflow.EXIT_NEEDS_ATTENTION;
+        }
+        int targetRound = requestedRound == null
+                ? state.round().number() : requestedRound;
+        TaskResult<RepairWorkflow.RestorePreview> previewResult;
+        try {
+            previewResult = CliWorkflow.previewRestore(instance, toolRoot, state.id(), targetRound);
+        } catch (Exception e) {
+            System.err.println("生成恢复预览失败：" + e.getMessage());
+            return CliWorkflow.EXIT_NEEDS_ATTENTION;
+        }
+        if (previewResult.state() != TaskSnapshot.State.SUCCEEDED
+                || previewResult.value() == null) {
+            System.err.println("恢复预览失败：" + previewResult.message());
+            return CliWorkflow.exitCode(previewResult);
+        }
+        RepairWorkflow.RestorePreview preview = previewResult.value();
+        System.out.println("工作流: " + state.id() + "，恢复到第 " + targetRound + " 轮前");
+        System.out.println("恢复计划: " + preview.plan().summary()
+                + "（摘要 " + preview.plan().shortDigest() + "）");
+        preview.plan().steps().forEach(step -> System.out.println("  - " + step.key()
+                + " · " + java.util.Objects.toString(step.fromHash(), "不存在")
+                + " → " + java.util.Objects.toString(step.toHash(), "不存在")));
+        if (dryRun) {
+            System.out.println("dry-run：只输出恢复计划，未修改任何文件。");
+            return CliWorkflow.EXIT_SUCCESS;
+        }
+        TaskResult<RepairWorkflow.State> restored = CliWorkflow.restore(instance, toolRoot,
+                preview, sink);
+        System.out.println(restored.message());
+        return CliWorkflow.exitCode(restored);
+    }
+
+    private static int runLegacyRestore(GameInstance instance, Path toolRoot,
+                                        Integer requestedRound, UUID workflowId) throws Exception {
+        if (workflowId != null) {
+            System.err.println("--workflow 只适用于新版 --restore；--legacy-restore 不支持工作流 UUID。");
+            return CliWorkflow.EXIT_NEEDS_ATTENTION;
+        }
+        System.out.println("警告：--legacy-restore 使用旧台账恢复，仅用于没有新版工作流的兼容记录。");
+        return CheckerEngine.restore(instance, toolRoot, requestedRound, System.out::println);
+    }
+
+    private static int runCheck(GameInstance inst, Path toolRoot, CheckerEngine.Options options) throws Exception {
+        try (TaskService tasks = new TaskService()) {
+            Thread shutdown = new Thread(tasks::close, "checker-check-shutdown");
+            Runtime.getRuntime().addShutdownHook(shutdown);
+            try {
+                var handle = tasks.submit(inst.dir().toAbsolutePath().normalize().toString(),
+                        CheckerTasks.check(inst, toolRoot, options), event -> {
+                            if (event.kind() == TaskEvent.Kind.LOG) System.out.println(event.text());
+                        });
+                var result = handle.completion().toCompletableFuture().get();
+                System.out.println(result.message());
+                return CheckerTasks.exitCode(result);
+            } finally {
+                try { Runtime.getRuntime().removeShutdownHook(shutdown); }
+                catch (IllegalStateException ignored) { }
+            }
+        }
     }
 
     // ==================================================================================
@@ -388,7 +611,7 @@ public final class CheckerCli {
             System.out.println("[2/4] 官方 API：跳过（镜像已可用）");
         }
 
-        System.out.println("[3/4] 解析一个真实 modId → slug → 版本 → 下载地址…");
+        System.out.println("[3/4] 解析一个 modId → slug → 版本 → 下载地址…");
         yagen.waitmydawn.checker.net.ModrinthClient.Candidate c = null;
         // 走通道管理器：镜像优先、失败回退官方；无人值守（asker=null）→ 不会挂在这里问用户
         yagen.waitmydawn.checker.net.NetworkManager nm =
@@ -506,14 +729,21 @@ public final class CheckerCli {
                   --java               列出探测到的 Java
                   --scan <实例名>      静态依赖预检（只读，不启动、不修改任何文件）
                   --check <实例名>     跑一轮：静态预检 → 启动 → 盯日志 → 诊断 → 报告
-                  --fix <实例名>       自动闭环：按 A(升加载器)/B(补前置)/C(摘模组) 修，直到通过
-                  --restore <实例名>   还原改动（默认从最新一轮往回还原全部）
-                  --round N            只还原第 N 轮
+                  --fix <实例名>       新版事务修复；默认读取全局策略，无保存时使用全自动 10 轮
+                  --policy saved|auto|ask|stop
+                                       新版修复授权来源；auto 必须显式指定，ASK 需要交互终端或 --dialog
+                  --legacy-fix <实例名>
+                                       旧版兼容修复（旧台账 / A+B+C），仅用于既有脚本
+                  --restore <实例名>   还原新版工作流；没有新版记录时兼容回退旧台账
+                  --workflow <UUID>    指定要还原的新版工作流，默认最新一条
+                  --round N            还原指定轮次前；新工作流默认最新轮次
+                  --legacy-restore <实例名>
+                                       强制使用旧台账恢复，仅用于兼容旧记录
                   --repeat N           --check 连跑 N 次，给出稳定性结论（默认 1）
                   --retry N            偶发崩溃先原样重启的次数（默认 1，上限 3）
-                  --rounds N           自动修复的初始轮次上限（默认 4，可用上限 20）
+                  --rounds N           显式覆盖本次修复轮次上限（默认沿用全局策略的 10 轮，可用上限 20）
                   --on-exhausted ask|stop|restore
-                                       跑完轮次仍未通过时：ask=问我要追加几轮（默认，
+                                       旧版兼容修复的轮次用尽策略：ask=问我要追加几轮（默认，
                                        无交互终端时按 stop 处理）/ stop=停止保留改动 /
                                        restore=停止并还原本次会话的全部改动
                   --cascade-limit N    一次级联摘除的模组数上限（默认 40）
@@ -531,11 +761,16 @@ public final class CheckerCli {
                   --mx 3G              游戏最大堆（默认 3G）
                   --timeout 180        每轮整体超时秒数（默认 180）
                   --grace 15           进主菜单后继续观察秒数（默认 15）
-                  --dry-run            只输出修复计划，不执行
+                  --dry-run            只输出计划；新版 --restore 可直接预览，旧版修复需配 --legacy-fix
                   --force              跳过"疑似游戏正在运行"的安全闸
                   --tool-root <路径>   软件目录（logs/、bin/、state/ 落在这里）
 
-                退出码: 0=通过  1=仍有问题  2=无法检验 / 用户中止
+                修复、还原和准备区清理对同一实例互斥；已有操作（含等待决定）时立即失败，不等待、不抢占。
+
+                版本兼容：--fix/--restore 已切换到新版工作流；旧 A+B+C 与旧台账入口须显式使用
+                --legacy-fix/--legacy-restore。非交互进程遇到 ASK 会在修改文件前失败。
+
+                退出码: 0=通过  1=检查仍有问题  2=需要人工处理/前置条件不足  130=任务取消
                 """);
     }
 }

@@ -1,5 +1,7 @@
 package yagen.waitmydawn.checker.action;
 
+import yagen.waitmydawn.checker.core.VersionUpdateStrategy;
+
 import java.util.List;
 
 /**
@@ -15,8 +17,24 @@ import java.util.List;
  * @param target    动作参数：UPGRADE_LOADER=目标最低版本；INSTALL_DEP=依赖方 modId；REMOVE_MOD=级联根
  * @param cascadeOf 非空表示"这是级联摘除"，值为级联根 modId
  * @param versionRange 依赖声明的版本区间（只有 INSTALL_DEP 用得上），用于挑"满足区间"的开发者版本
+ * @param versionRanges VERSION_MISMATCH 聚合后的全部版本区间
+ * @param versionStrategy VERSION_MISMATCH 的版本选择策略
  */
 public record PlannedAction(ActionKind kind, String modId, String jarFile, String category,
                             String reason, List<String> errorText, String target,
-                            String cascadeOf, String versionRange) {
+                            String cascadeOf, String versionRange, List<String> versionRanges,
+                            VersionUpdateStrategy versionStrategy) {
+    public PlannedAction {
+        errorText = errorText == null ? List.of() : List.copyOf(errorText);
+        versionRanges = versionRanges == null
+                ? (versionRange == null ? List.of() : List.of(versionRange))
+                : List.copyOf(versionRanges);
+    }
+
+    public PlannedAction(ActionKind kind, String modId, String jarFile, String category,
+                         String reason, List<String> errorText, String target,
+                         String cascadeOf, String versionRange) {
+        this(kind, modId, jarFile, category, reason, errorText, target, cascadeOf,
+                versionRange, versionRange == null ? List.of() : List.of(versionRange), null);
+    }
 }

@@ -34,6 +34,13 @@ public final class Tombstones {
         this.file = file;
     }
 
+    /** 为新事务记录构建规划视图，不读取或改写旧台账。 */
+    public static Tombstones forPlanning(java.util.Set<String> blocked) {
+        Tombstones view = new Tombstones(null);
+        blocked.forEach(id -> view.add(id, null, "存在未撤销的停用动作", 0));
+        return view;
+    }
+
     public static Tombstones load(Path stateDir) {
         Tombstones t = new Tombstones(stateDir.resolve("tombstones.json"));
         if (!Files.isRegularFile(t.file)) return t;
@@ -70,6 +77,7 @@ public final class Tombstones {
     }
 
     public void save() throws IOException {
+        if (file == null) throw new IllegalStateException("规划视图不能保存为旧版台账");
         Files.createDirectories(file.getParent());
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("note", "被判定移除的模组，后续轮次永不允许再装回（防增删循环）");

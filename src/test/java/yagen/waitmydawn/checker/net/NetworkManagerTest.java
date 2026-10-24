@@ -6,11 +6,15 @@ import org.junit.jupiter.api.io.TempDir;
 import yagen.waitmydawn.checker.core.ProxyConfig;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -109,6 +113,34 @@ class NetworkManagerTest {
         Http.DownloadOutcome o = nm.download(DEAD, null, 1234, cached);
         assertTrue(o.ok(), "已下好的文件应当直接复用");
         assertTrue(log.stream().anyMatch(l -> l.contains("复用已下载文件")), log.toString());
+    }
+
+    @Test
+    void 缓存长度不符时重新下载并替换(@TempDir Path tmp) throws Exception {
+        byte[] body = "fresh-download".getBytes(StandardCharsets.UTF_8);
+        AtomicInteger calls = new AtomicInteger();
+        var server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/cached.jar", exchange -> {
+            calls.incrementAndGet();
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        Path target = tmp.resolve("cached.jar");
+        Files.writeString(target, "stale");
+        try {
+            NetworkManager nm = new NetworkManager(null, null, false, false, m -> {
+            });
+            Http.DownloadOutcome outcome = nm.download(
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/cached.jar",
+                    null, body.length, target);
+            assertTrue(outcome.ok(), outcome.detail());
+            assertArrayEquals(body, Files.readAllBytes(target));
+            assertEquals(1, calls.get());
+        } finally {
+            server.stop(0);
+        }
     }
 
     @Test

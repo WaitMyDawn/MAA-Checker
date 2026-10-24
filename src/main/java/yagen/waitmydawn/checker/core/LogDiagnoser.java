@@ -94,6 +94,11 @@ public final class LogDiagnoser {
     /** {@code Caused by} 块里的 {@code from mod X}（L2） */
     private static final Pattern CAUSED_BY_FROM_MOD = Pattern.compile(
             "from\\s+mod\\s+([^\\s,;:\\]}]+)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ENVIRONMENT_ERROR = Pattern.compile(
+            "(?i)UnsupportedClassVersionError|Unsupported major\\.minor version"
+                    + "|UnsatisfiedLinkError|Failed to initialize GLFW|GLFW error"
+                    + "|EXCEPTION_ACCESS_VIOLATION|OutOfMemoryError|Java heap space"
+                    + "|Invalid shaders/");
 
     /** 归因时忽略的"框架层"名字（它们不是模组，摘不得） */
     private static final java.util.Set<String> FRAMEWORK = java.util.Set.of(
@@ -147,6 +152,10 @@ public final class LogDiagnoser {
             parseMixinFailures(lines, jarIndex, map);
             parseDuplicateMods(lines, jarIndex, map);
             parseMainException(lines, map);
+        }
+        parseEnvironment(rawLines, map);
+        if (hasKind(map, Diagnosis.Kind.ENVIRONMENT)) {
+            map.values().removeIf(i -> i.kind() == Diagnosis.Kind.CRASH_OTHER && i.modId() == null);
         }
         // 归因渠道（离线诊断同样适用：latest.log 的模组清单行本身就带 modId）
         List<String> attributions = new ArrayList<>();
@@ -215,6 +224,10 @@ public final class LogDiagnoser {
         }
         parseDuplicateMods(rawLines, jarIndex, issues);
         parseMainException(rawLines, issues);
+        parseEnvironment(rawLines, issues);
+        if (hasKind(issues, Diagnosis.Kind.ENVIRONMENT)) {
+            issues.values().removeIf(i -> i.kind() == Diagnosis.Kind.CRASH_OTHER && i.modId() == null);
+        }
 
         // ---- 归因渠道：日志里没有可定位的 modId 时，按优先级 L4 > L2 > L3 反查肇事模组 ----
         List<String> attributions = new ArrayList<>();
@@ -482,6 +495,16 @@ public final class LogDiagnoser {
                 + "|" + issue.expectedRange() + "|" + issue.actualVersion(), issue);
     }
 
+    private static void parseEnvironment(List<String> lines, Map<String, Diagnosis.Issue> issues) {
+        for (String line : lines) {
+            if (ENVIRONMENT_ERROR.matcher(line).find()) {
+                add(issues, new Diagnosis.Issue(Diagnosis.Kind.ENVIRONMENT, null, null,
+                        "-", "-", null, truncate(line.strip())));
+                return;
+            }
+        }
+    }
+
     private static String truncate(String s) {
         return s.length() <= DETAIL_MAX_CHARS ? s : s.substring(0, DETAIL_MAX_CHARS) + "…";
     }
@@ -527,6 +550,10 @@ public final class LogDiagnoser {
                                                  ModJarIndex.Meta meta,
                                                  Map<String, Diagnosis.Issue> issues,
                                                  List<String> attributions) {
+        if (hasKind(issues, Diagnosis.Kind.ENVIRONMENT)) {
+            attributions.add("检测到 Java、原生库、图形或资源环境故障，未采用模组堆栈候选");
+            return;
+        }
         parseVersionFormatFingerprint(rawLines, inst, meta, issues, attributions);
         if (attributed(issues, Diagnosis.Kind.BAD_VERSION_FORMAT)) {
             collectLowConfidenceCandidates(rawLines, meta, attributions,
@@ -545,6 +572,10 @@ public final class LogDiagnoser {
     /** 某条渠道是否已经定位到了具体模组 */
     private static boolean attributed(Map<String, Diagnosis.Issue> issues, Diagnosis.Kind kind) {
         return issues.values().stream().anyMatch(i -> i.kind() == kind && i.modId() != null);
+    }
+
+    private static boolean hasKind(Map<String, Diagnosis.Issue> issues, Diagnosis.Kind kind) {
+        return issues.values().stream().anyMatch(i -> i.kind() == kind);
     }
 
     /**

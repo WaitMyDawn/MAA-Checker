@@ -31,9 +31,12 @@ public final class NeoForgeVersions {
      */
     public static String latestSatisfying(String mcVersion, String minVersion, Consumer<String> log)
             throws IOException {
+        return selectLatest(Http.getString(METADATA, log), mcVersion, minVersion, log);
+    }
+
+    static String selectLatest(String xml, String mcVersion, String minVersion, Consumer<String> log) {
         String prefix = mcPrefix(mcVersion);
         if (prefix == null) return null;
-        String xml = Http.getString(METADATA, log);
         List<String> candidates = new ArrayList<>();
         Matcher m = VERSION_TAG.matcher(xml);
         while (m.find()) {

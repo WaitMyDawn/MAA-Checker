@@ -33,7 +33,10 @@ import java.util.regex.Pattern;
  */
 public final class ModToml {
 
-    public record ModDecl(String modId, String version) {
+    public record ModDecl(String modId, String version, String displayName) {
+        public ModDecl(String modId, String version) {
+            this(modId, version, modId);
+        }
     }
 
     /** @param requester 发起依赖的一方（= dependencies.&lt;requester&gt; 里的名字） */
@@ -88,7 +91,8 @@ public final class ModToml {
     private static void addMod(List<ModDecl> out, String body) {
         String id = strValue(body, "modId");
         if (id == null || id.isBlank()) return;
-        out.add(new ModDecl(id, orDefault(strValue(body, "version"), "?")));
+        out.add(new ModDecl(id, orDefault(strValue(body, "version"), "?"),
+                orDefault(strValue(body, "displayName"), id)));
     }
 
     /** 同一个 modId 只留一条（内联数组可能同时被表头解析路径看到） */
