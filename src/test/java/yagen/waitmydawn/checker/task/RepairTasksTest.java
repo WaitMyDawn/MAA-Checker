@@ -318,10 +318,12 @@ public class RepairTasksTest {
         var plan = run(RepairTasks.prepare(report, tool, options(), (a, i, c) -> List.of())).value();
         assertTrue(plan.executable(), plan.blocked().toString());
         var execution = run(RepairTasks.execute(plan, tool, options())).value();
+        assertEquals(1, execution.changed());
         assertFalse(Files.exists(broken));
 
-        Files.setLastModifiedTime(instance.dir().resolve("logs/latest.log"),
-                java.nio.file.attribute.FileTime.fromMillis(0));
+        // 该测试注入诊断，执行验证是否生成本地日志不应改变恢复阶段的前置条件。
+        Path latestLog = instance.dir().resolve("logs/latest.log");
+        Files.deleteIfExists(latestLog);
         var restore = run(RepairTasks.restore(instance, tool, execution.sessionId()));
         assertEquals(TaskSnapshot.State.SUCCEEDED, restore.state(), restore.message());
         assertEquals(initial, RepairInputs.capture(instance));
