@@ -202,6 +202,9 @@ public final class RepairTasks {
             context.checkpoint();
             boolean marker = report.inputs().hashes().containsKey("marker")
                     && changes.stream().anyMatch(c -> c.action().kind() == ActionKind.REMOVE_MOD);
+            if (changes.isEmpty() && loader == null && blocked.isEmpty()) {
+                blocked.add("诊断没有产生可执行的修复动作；请查看本轮报告中的运行日志，不能安全自动修改实例。");
+            }
             return TaskResult.success(new Plan(instance, report.inputs(), changes, blocked, notes, roundNumber, marker, loader),
                     blocked.isEmpty() ? "修复方案已准备，等待确认" : "方案存在限制，实例未修改");
         };

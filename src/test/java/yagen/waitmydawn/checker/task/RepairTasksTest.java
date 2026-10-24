@@ -284,6 +284,24 @@ public class RepairTasksTest {
     }
 
     @Test
+    void 诊断没有动作时返回明确阻断原因() throws Exception {
+        GameInstance instance = fixture(temp.resolve("game"), "repairable");
+        var round = new CheckerEngine.Round(instance, null, 21, StaticDepsScanner.scan(instance),
+                null, null, new Diagnosis(List.of(), List.of(), null, false, "fixture without issue"),
+                ModJarIndex.scanMeta(instance.modsDir()).jarOf());
+        var report = new CheckerEngine.CheckReport(1, temp.resolve("report"), List.of(round),
+                RepairInputs.capture(instance));
+
+        RepairTasks.Plan plan = run(RepairTasks.prepare(report, temp.resolve("tool"), options(),
+                (a, i, c) -> List.of())).value();
+
+        assertFalse(plan.executable());
+        assertTrue(plan.changes().isEmpty());
+        assertTrue(plan.blocked().stream().anyMatch(value -> value.contains("没有产生可执行的修复动作")),
+                plan.blocked().toString());
+    }
+
+    @Test
     void 中文空格长路径可扫描记录执行并还原() throws Exception {
         Path root = temp.resolve("中文 整合 包")
                 .resolve("第一层目录-用于验证较长路径")
@@ -294,7 +312,9 @@ public class RepairTasksTest {
         var initial = RepairInputs.capture(instance);
         Path tool = temp.resolve("工具 状态-也应该支持空格");
 
-        CheckerEngine.CheckReport report = diagnose(instance);
+        CheckerEngine.CheckReport report = report(instance,
+                new Diagnosis.Issue(Diagnosis.Kind.MOD_LOAD_FAILURE, "broken", "broken",
+                        "-", "-", "broken.jar", "fixture initialization failure"));
         var plan = run(RepairTasks.prepare(report, tool, options(), (a, i, c) -> List.of())).value();
         assertTrue(plan.executable(), plan.blocked().toString());
         var execution = run(RepairTasks.execute(plan, tool, options())).value();
