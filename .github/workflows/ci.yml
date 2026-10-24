@@ -26,6 +26,16 @@ jobs:
 
       - name: 单测
         run: mvn -B -ntp test
+      - name: 标注失败用例
+        if: failure()
+        shell: pwsh
+        run: ./.github/scripts/report-test-failures.ps1 -ReportsRoot target/surefire-reports
+      - name: 保存核心测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-reports
+          path: target/surefire-reports/
 
   desktop-preview:
     name: JavaFX 桌面预览验收
@@ -39,6 +49,10 @@ jobs:
           cache: maven
       - name: 核心回归与 JavaFX 图形测试
         run: mvn -B -ntp -Pdesktop test
+      - name: 标注失败用例
+        if: failure()
+        shell: pwsh
+        run: ./.github/scripts/report-test-failures.ps1 -ReportsRoot target/desktop/surefire-reports
       - name: 保存测试报告和窗口截图
         if: always()
         uses: actions/upload-artifact@v4

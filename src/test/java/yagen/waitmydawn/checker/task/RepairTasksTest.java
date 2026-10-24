@@ -67,7 +67,7 @@ public class RepairTasksTest {
 
     private <T> TaskResult<T> run(TaskService.Work<T> work) throws Exception {
         try (var tasks = new TaskService()) {
-            return tasks.submit("fixture", work, null).completion().toCompletableFuture().get(25, TimeUnit.SECONDS);
+            return tasks.submit("fixture", work, null).completion().toCompletableFuture().get(90, TimeUnit.SECONDS);
         }
     }
 

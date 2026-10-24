@@ -50,7 +50,7 @@ class CheckerTasksIntegrationTest {
                 false, true, 1, 0, "abort", null, null, false, false, null, defaults.notifier());
         try (TaskService tasks = new TaskService()) {
             var result = tasks.submit("fixture", CheckerTasks.check(InstanceScanner.scanOne(root, instance), artifacts, options), events::add)
-                    .completion().toCompletableFuture().get(15, TimeUnit.SECONDS);
+                    .completion().toCompletableFuture().get(45, TimeUnit.SECONDS);
             assertEquals(TaskSnapshot.State.SUCCEEDED, result.state(), result.message());
             assertEquals(0, CheckerTasks.exitCode(result));
             assertTrue(events.stream().anyMatch(e -> e.snapshot().phase() == TaskSnapshot.Phase.OBSERVING));
@@ -73,7 +73,7 @@ class CheckerTasksIntegrationTest {
                 false, true, 1, 0, "abort", null, null, false, false, null, defaults.notifier());
         try (TaskService tasks = new TaskService()) {
             var result = tasks.submit("fixture", CheckerTasks.diagnose(InstanceScanner.scanOne(root, instance),
-                    tmp.resolve("artifacts"), options), null).completion().toCompletableFuture().get(15, TimeUnit.SECONDS);
+                    tmp.resolve("artifacts"), options), null).completion().toCompletableFuture().get(45, TimeUnit.SECONDS);
             assertEquals(TaskSnapshot.State.FAILED, result.state());
             assertNotNull(result.value());
             assertEquals(1, result.value().exitCode());

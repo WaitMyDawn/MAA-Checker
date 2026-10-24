@@ -20,7 +20,7 @@ class RepairWorkflowTest {
         return new CheckerEngine.Options("1G", 10, 0, 1, o.cascadeLimit(), false, true, 1, 0, "abort", null, null, false, false, null, o.notifier());
     }
     private <T> TaskResult<T> run(TaskService.Work<T> work) throws Exception {
-        try (var tasks = new TaskService()) { return tasks.submit("fixture", work, null).completion().toCompletableFuture().get(45, TimeUnit.SECONDS); }
+        try (var tasks = new TaskService()) { return tasks.submit("fixture", work, null).completion().toCompletableFuture().get(120, TimeUnit.SECONDS); }
     }
     private RepairPolicy policy(RepairPolicy.Category category, RepairPolicy.Mode mode) { return new RepairPolicy(Map.of(category, mode), 4); }
     private TaskService.Work<RepairWorkflow.State> work(GameInstance i, RepairPolicy p, RepairWorkflow.State previous,

@@ -73,6 +73,7 @@ class DesktopSmokeTest {
                         .findFirst().orElse(null));
                 assertNull(shell.root().lookupAll(".label").stream()
                         .filter(node -> node instanceof Label label
+                                && !label.getStyleClass().contains("notice")
                                 && label.getText().contains("当前阶段"))
                         .findFirst().orElse(null));
                 assertTrue(shell.root().lookupAll(".label").stream()

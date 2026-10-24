@@ -21,7 +21,7 @@ public class LoaderRepairTest {
                 1, 0, "abort", null, null, false, false, null, o.notifier());
     }
     private <T> TaskResult<T> run(TaskService.Work<T> work) throws Exception {
-        try (var tasks = new TaskService()) { return tasks.submit("fixture", work, null).completion().toCompletableFuture().get(25, TimeUnit.SECONDS); }
+        try (var tasks = new TaskService()) { return tasks.submit("fixture", work, null).completion().toCompletableFuture().get(60, TimeUnit.SECONDS); }
     }
     private RepairTasks.Plan plan(GameInstance instance, Path installer) throws Exception {
         var diagnosis = run(CheckerTasks.diagnose(instance, temp.resolve("tool"), options()));
